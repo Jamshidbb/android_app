@@ -1,0 +1,12 @@
+
+# Gradle build outputs
+# Keystore files
+# Local files
+*.iml
+*.jks
+*.keystore
+.gradle/
+.idea/
+app/build/
+build/
+local.properties
