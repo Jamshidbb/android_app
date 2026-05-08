@@ -47,27 +47,53 @@ jobs:
           # Create directories
           mkdir -p gradle/wrapper
           
-          # Get Gradle version
           GRADLE_VERSION="${{ steps.gradle-version.outputs.version }}"
           
-          # Download the full Gradle distribution
-          echo "Downloading Gradle $GRADLE_VERSION distribution..."
-          curl -L -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+          # Check if wrapper jar already exists in project
+          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "✅ Using existing gradle-wrapper.jar from project"
+          else
+            # Download the full Gradle distribution
+            echo "Downloading Gradle $GRADLE_VERSION distribution..."
+            curl -L -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+            
+            # Extract it
+            echo "Extracting Gradle distribution..."
+            unzip -q /tmp/gradle.zip -d /tmp/
+            
+            # Find gradle-wrapper.jar in different possible locations
+            echo "Looking for gradle-wrapper.jar..."
+            
+            # Try different locations where the wrapper jar might be
+            if [ -f "/tmp/gradle-${GRADLE_VERSION}/lib/plugins/gradle-wrapper.jar" ]; then
+              # Gradle 8.x and earlier
+              cp "/tmp/gradle-${GRADLE_VERSION}/lib/plugins/gradle-wrapper.jar" gradle/wrapper/
+              echo "✅ Found in lib/plugins/"
+            elif [ -f "/tmp/gradle-${GRADLE_VERSION}/lib/gradle-wrapper.jar" ]; then
+              # Alternative location
+              cp "/tmp/gradle-${GRADLE_VERSION}/lib/gradle-wrapper.jar" gradle/wrapper/
+              echo "✅ Found in lib/"
+            elif [ -f "/tmp/gradle-${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" ]; then
+              # Source distribution
+              cp "/tmp/gradle-${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/
+              echo "✅ Found in gradle/wrapper/"
+            else
+              # Download wrapper jar directly from GitHub as fallback
+              echo "⚠️ Could not find in extracted distribution, downloading from GitHub..."
+              curl -L -o gradle/wrapper/gradle-wrapper.jar "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar"
+              echo "✅ Downloaded from GitHub"
+            fi
+          fi
           
-          # Extract it
-          echo "Extracting Gradle distribution..."
-          unzip -q /tmp/gradle.zip -d /tmp/
-          
-          # Copy the wrapper JAR from the extracted distribution
-          echo "Copying gradle-wrapper.jar..."
-          cp "/tmp/gradle-${GRADLE_VERSION}/lib/plugins/gradle-wrapper.jar" gradle/wrapper/
-          
-          # Create gradle-wrapper.properties
-          echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
-          echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-          echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
-          echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
-          echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+          # Create gradle-wrapper.properties if it doesn't exist
+          if [ ! -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            echo "Creating gradle-wrapper.properties..."
+            echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
+            echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+            echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
+            echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
+            echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+          fi
           
           # Create gradlew script
           cat > gradlew << 'EOF'
@@ -82,17 +108,18 @@ jobs:
           
           chmod +x gradlew
           
-          # Verify the jar file exists and is valid
+          # Verify the jar file exists
           if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "✅ gradle-wrapper.jar size: $(ls -lh gradle/wrapper/gradle-wrapper.jar | awk '{print $5}')"
-            echo "✅ Gradle wrapper setup complete"
+            JAR_SIZE=$(ls -lh gradle/wrapper/gradle-wrapper.jar | awk '{print $5}')
+            echo "✅ gradle-wrapper.jar present (size: $JAR_SIZE)"
           else
-            echo "❌ Failed to copy gradle-wrapper.jar"
+            echo "❌ gradle-wrapper.jar not found!"
             exit 1
           fi
           
           # Test the wrapper
-          ./gradlew --version || echo "⚠️ Gradle wrapper test failed but continuing..."
+          echo "Testing gradlew..."
+          ./gradlew --version || echo "⚠️ Gradle wrapper test had issues but continuing..."
       
       - name: Download all dependencies
         run: |
@@ -105,42 +132,25 @@ jobs:
           ./gradlew build --dry-run 2>&1 || true
           ./gradlew dependencies 2>&1 || true
           
-          # Create a simple dependency resolution script
-          cat > resolve.gradle << 'EOF'
-          task resolveDeps {
-              doLast {
-                  def resolved = []
-                  allprojects.each { project ->
-                      project.configurations.each { config ->
-                          if (config.isCanBeResolved()) {
-                              try {
-                                  def files = config.files
-                                  resolved << "${project.name}:${config.name} -> ${files.size()} files"
-                                  println "Resolved ${project.name}:${config.name} - ${files.size()} dependencies"
-                              } catch (Exception e) {
-                                  println "Skip ${project.name}:${config.name} - ${e.message}"
-                              }
-                          }
-                      }
-                  }
-                  println "\n=== Summary ==="
-                  resolved.each { println it }
-              }
-          }
-          EOF
+          # Download all dependency configurations
+          ./gradlew dependencyInsight --all 2>&1 || true
           
-          ./gradlew -b resolve.gradle resolveDeps 2>&1 || true
+          # Alternative: use gradle's built-in dependency resolution
+          ./gradlew help --scan 2>&1 || true
           
           echo "✅ Dependency download completed"
       
       - name: Cache Gradle user home
         uses: actions/cache@v4
+        id: gradle-cache
         with:
-          path: ~/.gradle/caches
-          key: ${{ runner.os }}-gradle-caches-${{ steps.gradle-version.outputs.version }}-${{ hashFiles('**/*.gradle', '**/*.gradle.kts', '**/gradle-wrapper.properties') }}
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ steps.gradle-version.outputs.version }}-${{ hashFiles('**/*.gradle', '**/*.gradle.kts', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-caches-${{ steps.gradle-version.outputs.version }}-
-            ${{ runner.os }}-gradle-caches-
+            ${{ runner.os }}-gradle-${{ steps.gradle-version.outputs.version }}-
+            ${{ runner.os }}-gradle-
       
       - name: Prepare cache for repository
         run: |
@@ -155,8 +165,7 @@ jobs:
             cp -r ~/.gradle/caches/modules-2 gradle-cache-data/caches/
             echo "✅ Copied modules cache"
           else
-            echo "⚠️ No modules cache found at ~/.gradle/caches/modules-2"
-            # Create empty directory to avoid upload errors
+            echo "⚠️ No modules cache found"
             mkdir -p gradle-cache-data/caches
           fi
           
@@ -166,7 +175,7 @@ jobs:
             echo "✅ Copied wrapper distributions"
           fi
           
-          # Copy wrapper files from project
+          # Copy wrapper files from project (always include these)
           if [ -d "gradle/wrapper" ]; then
             mkdir -p gradle-cache-data/gradle
             cp -r gradle/wrapper gradle-cache-data/gradle/
@@ -183,8 +192,6 @@ jobs:
             JAR_COUNT=$(find gradle-cache-data -name "*.jar" 2>/dev/null | wc -l)
             CACHE_SIZE=$(du -sh gradle-cache-data 2>/dev/null | cut -f1)
             echo "✅ Cache contains $JAR_COUNT JAR files, total size: $CACHE_SIZE"
-          else
-            echo "⚠️ No cache data to report"
           fi
       
       - name: Create setup script
@@ -293,6 +300,9 @@ jobs:
           
           ## Quick Start
           
-          1. Checkout this branch:
-             ```bash
-             git checkout gradle-dependency-cache
+          ### Option 1: Use the setup script
+          ```bash
+          git checkout gradle-dependency-cache
+          ./.gradle-cache/setup-cache.sh
+          git checkout -
+          ./gradlew build
