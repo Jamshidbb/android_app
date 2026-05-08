@@ -24,6 +24,11 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
       
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '9.2.1'
+      
       - name: Backup and replace build files
         run: |
           # Backup original files
@@ -60,8 +65,8 @@ jobs:
           # Create root build.gradle.kts
           cat > build.gradle.kts << 'EOF'
           plugins {
-              id("com.android.application") version "8.2.0" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.0" apply false
+              id("com.android.application") version "8.5.0" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.20" apply false
           }
           EOF
           
@@ -92,11 +97,11 @@ jobs:
                   }
               }
               compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_1_8
-                  targetCompatibility = JavaVersion.VERSION_1_8
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
               }
               kotlinOptions {
-                  jvmTarget = "1.8"
+                  jvmTarget = "17"
               }
           }
           
@@ -108,17 +113,6 @@ jobs:
           EOF
           
           echo "Created temporary build files"
-      
-      - name: Generate Gradle wrapper
-        run: |
-          if [ ! -f "gradlew" ]; then
-            GRADLE_VERSION="8.5"
-            wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
-            unzip -q gradle-${GRADLE_VERSION}-bin.zip
-            ./gradle-${GRADLE_VERSION}/bin/gradle wrapper --gradle-version ${GRADLE_VERSION}
-            rm -rf gradle-${GRADLE_VERSION} gradle-${GRADLE_VERSION}-bin.zip
-          fi
-          chmod +x gradlew
       
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
@@ -132,14 +126,9 @@ jobs:
       
       - name: Download dependencies
         run: |
-          # Make gradlew executable
-          chmod +x gradlew
-          
-          # Download dependencies without building
-          ./gradlew --no-daemon dependencies || true
-          
-          # Force download of all configurations
-          ./gradlew --no-daemon downloadDependencies || true
+          # Use gradle from the setup action (version 9.2.1)
+          gradle --no-daemon dependencies || true
+          gradle --no-daemon build --dry-run || true
           
           echo "Dependency download completed"
           
@@ -151,11 +140,6 @@ jobs:
       - name: Package dependencies
         run: |
           mkdir -p .gradle-dependencies
-          
-          # Copy wrapper
-          cp -r gradle .gradle-dependencies/ 2>/dev/null || true
-          cp gradlew .gradle-dependencies/ 2>/dev/null || true
-          cp gradlew.bat .gradle-dependencies/ 2>/dev/null || true
           
           # Copy build files for reference
           cp settings.gradle.kts .gradle-dependencies/settings.gradle.kts.working 2>/dev/null || true
@@ -181,19 +165,33 @@ jobs:
           cat > .gradle-dependencies/restore.sh << 'EOF'
           #!/bin/bash
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
           echo "Restoring Gradle dependencies..."
-          if [ -d "$SCRIPT_DIR/gradle" ]; then cp -r "$SCRIPT_DIR/gradle" "$REPO_ROOT/"; fi
-          if [ -f "$SCRIPT_DIR/gradlew" ]; then cp "$SCRIPT_DIR/gradlew" "$REPO_ROOT/" && chmod +x "$REPO_ROOT/gradlew"; fi
-          if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then mkdir -p "$HOME/.gradle" && cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"; fi
-          if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then mkdir -p "$HOME/.gradle" && cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"; fi
+          
+          # Restore caches to home directory
+          if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then
+            mkdir -p "$HOME/.gradle"
+            cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"
+            echo "Restored Gradle caches"
+          fi
+          
+          if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then
+            mkdir -p "$HOME/.gradle"
+            cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"
+            echo "Restored Gradle wrapper"
+          fi
+          
           echo "Restore complete"
+          echo ""
+          echo "Note: Make sure your project uses Gradle 9.2.1"
+          echo "You can verify with: gradle --version"
           EOF
           chmod +x .gradle-dependencies/restore.sh
           
           # Create restore instructions
           cat > .gradle-dependencies/README.md << 'EOF'
-          # Gradle Dependencies Cache
+          # Gradle Dependencies Cache (Gradle 9.2.1)
+          
+          This cache contains downloaded dependencies for Gradle 9.2.1.
           
           ## Restore
           ```bash
