@@ -110,77 +110,107 @@ jobs:
               implementation("com.google.android.material:material:1.11.0")
           }
           EOF
+          
+          echo "Created temporary build files"
       
       - name: Download dependencies
         run: |
           gradle --no-daemon dependencies || true
           gradle --no-daemon build --dry-run || true
           echo "Dependency download completed"
+          
+          # Show cache size
+          echo "Total cache size: $(du -sh $HOME/.gradle/caches | cut -f1)"
       
-      - name: Copy dependencies to repo (excluding super large files)
+      - name: Zip and split Gradle cache
         run: |
-          # Create gradle-cache directory in repo root
-          mkdir -p gradle-cache
+          echo "Zipping Gradle cache..."
           
-          # Copy Gradle caches but exclude files > 100MB
-          if [ -d "$HOME/.gradle/caches" ]; then
-            rsync -av --exclude='*.lock' \
-                      --exclude='tmp/' \
-                      --exclude='journal-*' \
-                      --exclude='fileHashes.bin' \
-                      --exclude='fileSnapshots.bin' \
-                      --exclude='resourceHashesCache.bin' \
-                      --exclude='buildHistory.bin' \
-                      --exclude='outputFiles.bin' \
-                      --exclude='gradle-api-*.jar' \
-                      --exclude='instrumented-kotlin-compiler-*.jar' \
-                      --exclude='kotlin-compiler-embeddable-*.jar' \
-                      --exclude='kotlin-daemon-client-*.jar' \
-                      $HOME/.gradle/caches/ gradle-cache/caches/
+          # Create directory for split files
+          mkdir -p gradle-cache-parts
+          
+          # Zip the entire Gradle cache
+          zip -r gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper
+          
+          # Split into 95MB parts (safe under GitHub's 100MB limit)
+          echo "Splitting into 95MB parts..."
+          split -b 95m gradle-cache.zip gradle-cache-parts/gradle-cache.zip.part-
+          
+          # Count parts
+          PART_COUNT=$(ls gradle-cache-parts/ | wc -l)
+          echo "Created $PART_COUNT parts"
+          
+          # List parts with sizes
+          ls -lh gradle-cache-parts/
+          
+          # Create checksum file for verification
+          sha256sum gradle-cache.zip > gradle-cache-parts/checksum.txt
+          
+          # Create manifest of parts
+          ls -1 gradle-cache-parts/ > gradle-cache-parts/manifest.txt
+          
+          # Create restoration script
+          cat > gradle-cache-parts/restore.sh << 'EOF'
+          #!/bin/bash
+          echo "Restoring Gradle cache from split parts..."
+          
+          # Check if all parts exist
+          MISSING=0
+          for part in gradle-cache.zip.part-*; do
+              if [ ! -f "$part" ]; then
+                  echo "Missing: $part"
+                  MISSING=1
+              fi
+          done
+          
+          if [ $MISSING -eq 1 ]; then
+              echo "ERROR: Missing parts. Please download all parts first."
+              exit 1
           fi
           
-          if [ -d "$HOME/.gradle/wrapper" ]; then
-            cp -r $HOME/.gradle/wrapper gradle-cache/
+          # Combine parts
+          echo "Combining parts..."
+          cat gradle-cache.zip.part-* > gradle-cache.zip
+          
+          # Verify checksum
+          echo "Verifying checksum..."
+          sha256sum -c checksum.txt
+          
+          if [ $? -ne 0 ]; then
+              echo "ERROR: Checksum verification failed!"
+              exit 1
           fi
           
-          # Create restore script that will download large files on demand
-          cat > gradle-cache/restore.sh << 'EOF'
+          # Extract
+          echo "Extracting to ~/.gradle/..."
+          unzip -q gradle-cache.zip -d $HOME/
+          
+          # Cleanup
+          rm gradle-cache.zip
+          
+          echo "✅ Gradle cache restored successfully!"
+          echo "Cache location: ~/.gradle/caches/"
+          EOF
+          chmod +x gradle-cache-parts/restore.sh
+          
+          # Create setup script at root level
+          cat > setup-gradle-cache.sh << 'EOF'
           #!/bin/bash
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          echo "Restoring Gradle dependencies from repo..."
           
-          if [ -d "$SCRIPT_DIR/caches" ]; then
-            mkdir -p "$HOME/.gradle"
-            cp -r "$SCRIPT_DIR/caches" "$HOME/.gradle/"
-            echo "✓ Restored caches"
-          fi
-          
-          if [ -d "$SCRIPT_DIR/wrapper" ]; then
-            mkdir -p "$HOME/.gradle"
-            cp -r "$SCRIPT_DIR/wrapper" "$HOME/.gradle/"
-            echo "✓ Restored wrapper"
-          fi
-          
-          echo "✓ Restore complete"
-          echo ""
-          echo "Note: Some large JAR files will be downloaded on first build"
-          echo "Run './gradlew build' to download missing files"
-          EOF
-          chmod +x gradle-cache/restore.sh
-          
-          # Create restore script at root
-          cat > restore-gradle-cache.sh << 'EOF'
-          #!/bin/bash
-          if [ -d "gradle-cache" ]; then
-            gradle-cache/restore.sh
+          if [ -d "$SCRIPT_DIR/gradle-cache-parts" ]; then
+              cd "$SCRIPT_DIR/gradle-cache-parts"
+              ./restore.sh
+              cd "$SCRIPT_DIR"
           else
-            echo "Error: gradle-cache directory not found"
+              echo "ERROR: gradle-cache-parts directory not found"
+              echo "Please run the Gradle Dependencies workflow first"
+              exit 1
           fi
           EOF
-          chmod +x restore-gradle-cache.sh
+          chmod +x setup-gradle-cache.sh
           
-          echo "Dependencies copied to gradle-cache/"
-          echo "Size: $(du -sh gradle-cache 2>/dev/null | cut -f1)"
+          echo "Zip and split completed"
       
       - name: Restore original build files
         run: |
@@ -188,97 +218,64 @@ jobs:
           [ -f "settings.gradle.kts.original" ] && mv settings.gradle.kts.original settings.gradle.kts
           rm -rf app 2>/dev/null || true
       
-      - name: Prepare .gitignore
-        run: |
-          # Remove .gitignore entries that exclude our scripts
-          if [ -f ".gitignore" ]; then
-            sed -i '/restore-gradle-cache.sh/d' .gitignore
-            sed -i '/^gradle-cache\/$/d' .gitignore
-          fi
-          
-          # Add proper .gitignore for cache
-          cat > .gitignore.tmp << 'EOF'
-          # Gradle build outputs
-          .gradle/
-          build/
-          app/build/
-          
-          # Local files
-          local.properties
-          *.iml
-          .idea/
-          
-          # Keystore files
-          *.jks
-          *.keystore
-          EOF
-          
-          # Merge with existing .gitignore if it exists
-          if [ -f ".gitignore" ]; then
-            cat .gitignore >> .gitignore.tmp
-          fi
-          sort -u .gitignore.tmp > .gitignore
-          rm .gitignore.tmp
-      
-      - name: Commit and push to repo
+      - name: Commit and push parts one by one
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Add files (force add to override .gitignore)
-          git add -f gradle-cache/
-          git add -f restore-gradle-cache.sh
-          git add .gitignore
+          # Ensure .gitignore doesn't exclude our files
+          if [ -f ".gitignore" ]; then
+            sed -i '/gradle-cache-parts/d' .gitignore
+            sed -i '/setup-gradle-cache.sh/d' .gitignore
+          fi
           
-          # Check if there are changes
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Add Gradle dependencies cache (excluding super large files) [skip ci]"
+          # First, add the scripts and metadata
+          git add gradle-cache-parts/restore.sh
+          git add gradle-cache-parts/checksum.txt
+          git add gradle-cache-parts/manifest.txt
+          git add setup-gradle-cache.sh
+          git commit -m "Add Gradle cache restore scripts [skip ci]" || true
+          git push origin ${{ github.ref_name }}
+          
+          # Get list of part files
+          PARTS=$(ls gradle-cache-parts/gradle-cache.zip.part-* 2>/dev/null | sort)
+          
+          # Push each part individually
+          for PART in $PARTS; do
+            PART_NAME=$(basename $PART)
+            echo "Pushing $PART_NAME..."
+            
+            # Add this part
+            git add $PART
+            
+            # Commit with part name
+            git commit -m "Add Gradle cache part: $PART_NAME [skip ci]" || true
+            
+            # Push immediately
             git push origin ${{ github.ref_name }}
-            echo "✓ Pushed to repository"
-          fi
+            
+            echo "✅ Pushed $PART_NAME"
+          done
+          
+          echo ""
+          echo "=============================================="
+          echo "✅ All parts pushed successfully!"
+          echo "Total parts: $(ls gradle-cache-parts/gradle-cache.zip.part-* 2>/dev/null | wc -l)"
+          echo "=============================================="
       
-      - name: Create alternative download script for missing files
+      - name: Create README
         run: |
-          cat > download-missing-dependencies.sh << 'EOF'
-          #!/bin/bash
-          echo "Downloading missing Gradle dependencies..."
+          cat > gradle-cache-parts/README.md << 'EOF'
+          # Gradle Cache Split Parts
           
-          # Generate wrapper if missing
-          if [ ! -f "gradlew" ]; then
-            gradle wrapper
-          fi
+          This directory contains the Gradle cache split into 95MB parts.
           
-          # Download dependencies
-          ./gradlew dependencies
+          ## Total Parts
+          $(ls -1 gradle-cache.zip.part-* 2>/dev/null | wc -l) parts
           
-          echo "✓ Missing dependencies downloaded"
-          EOF
-          chmod +x download-missing-dependencies.sh
+          ## Restore Instructions
           
-          git add download-missing-dependencies.sh
-          git commit -m "Add missing dependencies download script [skip ci]" || true
-          git push origin ${{ github.ref_name }} || true
-      
-      - name: Summary
-        run: |
-          echo "=============================================="
-          echo "✅ DEPENDENCIES PUSHED TO REPOSITORY"
-          echo "=============================================="
-          echo ""
-          echo "What was committed:"
-          echo "  - Most Gradle caches (< 100MB files)"
-          echo "  - Restore scripts"
-          echo ""
-          echo "What was NOT committed (exceeds 100MB limit):"
-          echo "  - gradle-api-9.2.1.jar (178MB)"
-          echo "  - instrumented-kotlin-compiler-embeddable-1.9.20.jar (157MB)"
-          echo ""
-          echo "To restore on a new machine:"
-          echo "  1. Run: ./restore-gradle-cache.sh"
-          echo "  2. Run: ./download-missing-dependencies.sh"
-          echo ""
-          echo "Or simply run: ./gradlew build"
-          echo "(Gradle will download missing files automatically)"
-          echo "=============================================="
+          ### Automatic Restore
+          ```bash
+          # From repository root
+          ./setup-gradle-cache.sh
