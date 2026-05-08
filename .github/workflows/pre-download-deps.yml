@@ -1,289 +1,65 @@
-name: Pre-download Dependencies
+name: Download JARs
 
 on:
-  workflow_dispatch:  # Manual trigger
-  schedule:
-    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - 'buildSrc/**'
-      - '**.gradle.kts'
-      - '**.gradle'
+  workflow_dispatch:
 
 jobs:
-  download-deps:
+  download:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          
-      - name: Set up JDK 17
+      - uses: actions/checkout@v4
+      
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.5'
-          
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-            
-      - name: Create buildSrc build file
+      - name: Download JARs with Gradle
         run: |
-          cat > buildSrc/build.gradle.kts << 'EOF'
-          plugins {
-              `kotlin-dsl`
-          }
-          
+          cat > build.gradle << 'EOF'
           repositories {
               mavenCentral()
               google()
-              gradlePluginPortal()
-          }
-          
-          dependencies {
-              // Add any specific dependencies your plugin needs
-              implementation("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.0")
-              implementation("com.android.tools.build:gradle:8.1.0")
-          }
-          
-          java {
-              sourceCompatibility = JavaVersion.VERSION_11
-              targetCompatibility = JavaVersion.VERSION_11
-          }
-          EOF
-          
-      - name: Create pre-download script
-        run: |
-          cat > pre-download-dependencies.gradle << 'EOF'
-          repositories {
-              mavenCentral()
-              google()
-              gradlePluginPortal()
           }
           
           configurations {
-              pluginDeps
-              buildDeps
+              download
           }
           
           dependencies {
-              // Plugin dependencies
-              pluginDeps("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.0")
-              pluginDeps("com.android.tools.build:gradle:8.1.0")
-              
-              // Common Android dependencies
-              buildDeps("androidx.core:core-ktx:1.12.0")
-              buildDeps("androidx.appcompat:appcompat:1.6.1")
-              buildDeps("com.google.android.material:material:1.11.0")
-              buildDeps("androidx.constraintlayout:constraintlayout:2.1.4")
-              buildDeps("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+              download 'com.android.tools.build:gradle:8.1.0'
+              download 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.0'
+              download 'org.jetbrains.kotlin:kotlin-stdlib:1.9.0'
+              download 'androidx.core:core-ktx:1.12.0'
+              download 'androidx.appcompat:appcompat:1.6.1'
+              download 'com.google.android.material:material:1.11.0'
           }
           
-          task downloadPluginDeps {
-              doLast {
-                  println("Downloading plugin dependencies...")
-                  configurations.pluginDeps.get().files.each { file ->
-                      println("  → ${file.name} (${file.length() / 1024} KB)")
-                  }
-              }
-          }
-          
-          task downloadBuildDeps {
-              doLast {
-                  println("Downloading build dependencies...")
-                  configurations.buildDeps.get().files.each { file ->
-                      println("  → ${file.name} (${file.length() / 1024} KB)")
-                  }
-              }
-          }
-          
-          task downloadAllDeps {
-              dependsOn(downloadPluginDeps, downloadBuildDeps)
-              doLast {
-                  println("✅ All dependencies pre-downloaded successfully!")
-              }
+          task downloadJars(type: Copy) {
+              from configurations.download
+              into 'jars'
           }
           EOF
           
-      - name: Download all dependencies
+          gradle downloadJars --no-daemon
+          
+      - name: List downloaded JARs
         run: |
-          ./gradlew -b pre-download-dependencies.gradle downloadAllDeps --refresh-dependencies
-          ./gradlew buildSrc:dependencies --refresh-dependencies
+          echo "# Downloaded JARs" > JAR_LIST.md
+          echo "" >> JAR_LIST.md
+          echo "\`\`\`" >> JAR_LIST.md
+          ls -lh jars/ >> JAR_LIST.md
+          echo "\`\`\`" >> JAR_LIST.md
+          echo "" >> JAR_LIST.md
+          echo "Total: $(ls jars/ | wc -l) files" >> JAR_LIST.md
           
-      - name: Create Gradle wrapper cache directory
+      - name: Commit JARs
         run: |
-          mkdir -p .gradle/caches
-          mkdir -p .gradle/wrapper
-          
-      - name: Copy Gradle caches to repository
-        run: |
-          # Create vendor directory for dependencies
-          mkdir -p vendor/gradle
-          
-          # Copy dependency cache info
-          if [ -d ~/.gradle/caches/modules-2 ]; then
-            cp -r ~/.gradle/caches/modules-2 vendor/gradle/caches-modules-2
-            echo "✅ Copied ~/.gradle/caches/modules-2 to vendor/gradle/"
-          fi
-          
-          # Copy JDK info
-          echo "JAVA_HOME=$JAVA_HOME" > vendor/java-home.txt
-          
-          # Create a manifest of downloaded dependencies
-          find ~/.gradle/caches/modules-2/files-2.1 -type f -name "*.jar" 2>/dev/null | \
-            head -100 | \
-            while read jar; do
-              echo "$(basename $jar) ($(du -h $jar | cut -f1))" >> vendor/dependencies-manifest.txt
-            done
-          
-      - name: Create dependency lock files
-        run: |
-          # Generate Gradle lock files
-          ./gradlew dependencies --write-locks 2>/dev/null || true
-          
-          # Create .gradle/offline configuration
-          cat > .gradle/offline-config.gradle << 'EOF'
-          // Offline build configuration
-          ext {
-              offlineMode = true
-              dependencyCache = file("${rootDir}/vendor/gradle/caches-modules-2")
-          }
-          
-          allprojects {
-              buildscript {
-                  repositories {
-                      if (ext.offlineMode && ext.dependencyCache.exists()) {
-                          flatDir {
-                              dirs ext.dependencyCache
-                          }
-                      } else {
-                          mavenCentral()
-                          google()
-                      }
-                  }
-              }
-              
-              repositories {
-                  if (ext.offlineMode && ext.dependencyCache.exists()) {
-                      flatDir {
-                          dirs ext.dependencyCache
-                      }
-                  } else {
-                      mavenCentral()
-                      google()
-                  }
-              }
-          }
-          EOF
-          
-      - name: Create setup script for repository
-        run: |
-          cat > setup-offline-build.sh << 'EOF'
-          #!/bin/bash
-          
-          echo "Setting up offline build environment..."
-          
-          # Copy cached dependencies to Gradle cache
-          if [ -d "vendor/gradle/caches-modules-2" ]; then
-            mkdir -p ~/.gradle/caches
-            cp -r vendor/gradle/caches-modules-2 ~/.gradle/caches/modules-2
-            echo "✅ Restored dependency cache"
-          fi
-          
-          # Apply offline configuration
-          echo "apply from: '.gradle/offline-config.gradle'" >> settings.gradle.kts
-          
-          echo "✅ Offline build environment ready!"
-          echo "Run: ./gradlew build --offline"
-          EOF
-          
-          chmod +x setup-offline-build.sh
-          
-      - name: Create README for offline dependencies
-        run: |
-          cat > vendor/README.md << 'EOF'
-          # Pre-downloaded Dependencies
-          
-          This directory contains pre-downloaded Gradle dependencies for offline builds.
-          
-          ## Contents
-          - `gradle/caches-modules-2/` - Cached Gradle dependencies
-          - `dependencies-manifest.txt` - List of downloaded JARs
-          - `java-home.txt` - Java version info
-          
-          ## Usage
-          1. Run `./setup-offline-build.sh` to restore dependencies
-          2. Build offline: `./gradlew build --offline`
-          
-          ## Updating
-          Run the GitHub Action "Pre-download Dependencies" manually or wait for the weekly schedule.
-          EOF
-          
-      - name: Commit and push dependencies
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Add all dependency-related files
-          git add vendor/ || true
-          git add .gradle/offline-config.gradle || true
-          git add setup-offline-build.sh || true
-          git add "*.lock" || true
-          
-          # Check if there are changes
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "🤖 Pre-download dependencies (automated)
-
-          This commit was automatically generated by GitHub Actions.
-          - Updates pre-downloaded Gradle dependencies
-          - $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-          [skip ci]"
-            git push origin HEAD:${{ github.ref_name }}
-          fi
-          
-      - name: Upload dependency manifest as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-dependencies-manifest
-          path: |
-            vendor/dependencies-manifest.txt
-            vendor/README.md
-          retention-days: 30
-          
-      - name: Generate dependency report
-        run: |
-          echo "# Dependency Download Report" > dependency-report.md
-          echo "" >> dependency-report.md
-          echo "Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> dependency-report.md
-          echo "" >> dependency-report.md
-          echo "## Downloaded Dependencies" >> dependency-report.md
-          echo '```' >> dependency-report.md
-          cat vendor/dependencies-manifest.txt >> dependency-report.md
-          echo '```' >> dependency-report.md
-          echo "" >> dependency-report.md
-          echo "## Cache Size" >> dependency-report.md
-          echo '```' >> dependency-report.md
-          du -sh vendor/gradle/ >> dependency-report.md 2>/dev/null || echo "0 KB" >> dependency-report.md
-          echo '```' >> dependency-report.md
-          
-          cat dependency-report.md >> $GITHUB_STEP_SUMMARY
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add jars/
+          git add JAR_LIST.md
+          git commit -m "Add pre-downloaded JAR files"
+          git push
