@@ -32,17 +32,6 @@ jobs:
         with:
           gradle-version: '9.2.1'
       
-      - name: Setup Git LFS
-        run: |
-          git lfs install
-          git lfs track "gradle-cache/**/*.jar"
-          git lfs track "gradle-cache/**/*.pom"
-          git lfs track "gradle-cache/**/*.aar"
-          git lfs track "gradle-cache/**/*.so"
-          git lfs track "gradle-cache/**/*.dll"
-          git lfs track "gradle-cache/**/*.dylib"
-          git add .gitattributes
-      
       - name: Create temporary build files
         run: |
           # Backup original files
@@ -128,14 +117,13 @@ jobs:
           gradle --no-daemon build --dry-run || true
           echo "Dependency download completed"
       
-      - name: Copy dependencies to repo
+      - name: Copy dependencies to repo (excluding super large files)
         run: |
           # Create gradle-cache directory in repo root
           mkdir -p gradle-cache
           
-          # Copy Gradle caches to repo (excluding large temp files)
+          # Copy Gradle caches but exclude files > 100MB
           if [ -d "$HOME/.gradle/caches" ]; then
-            # Exclude large cache files that can be regenerated
             rsync -av --exclude='*.lock' \
                       --exclude='tmp/' \
                       --exclude='journal-*' \
@@ -144,6 +132,10 @@ jobs:
                       --exclude='resourceHashesCache.bin' \
                       --exclude='buildHistory.bin' \
                       --exclude='outputFiles.bin' \
+                      --exclude='gradle-api-*.jar' \
+                      --exclude='instrumented-kotlin-compiler-*.jar' \
+                      --exclude='kotlin-compiler-embeddable-*.jar' \
+                      --exclude='kotlin-daemon-client-*.jar' \
                       $HOME/.gradle/caches/ gradle-cache/caches/
           fi
           
@@ -151,7 +143,7 @@ jobs:
             cp -r $HOME/.gradle/wrapper gradle-cache/
           fi
           
-          # Create restore script
+          # Create restore script that will download large files on demand
           cat > gradle-cache/restore.sh << 'EOF'
           #!/bin/bash
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -170,10 +162,13 @@ jobs:
           fi
           
           echo "✓ Restore complete"
+          echo ""
+          echo "Note: Some large JAR files will be downloaded on first build"
+          echo "Run './gradlew build' to download missing files"
           EOF
           chmod +x gradle-cache/restore.sh
           
-          # Create restore script at root for easy access
+          # Create restore script at root
           cat > restore-gradle-cache.sh << 'EOF'
           #!/bin/bash
           if [ -d "gradle-cache" ]; then
@@ -193,60 +188,97 @@ jobs:
           [ -f "settings.gradle.kts.original" ] && mv settings.gradle.kts.original settings.gradle.kts
           rm -rf app 2>/dev/null || true
       
+      - name: Prepare .gitignore
+        run: |
+          # Remove .gitignore entries that exclude our scripts
+          if [ -f ".gitignore" ]; then
+            sed -i '/restore-gradle-cache.sh/d' .gitignore
+            sed -i '/^gradle-cache\/$/d' .gitignore
+          fi
+          
+          # Add proper .gitignore for cache
+          cat > .gitignore.tmp << 'EOF'
+          # Gradle build outputs
+          .gradle/
+          build/
+          app/build/
+          
+          # Local files
+          local.properties
+          *.iml
+          .idea/
+          
+          # Keystore files
+          *.jks
+          *.keystore
+          EOF
+          
+          # Merge with existing .gitignore if it exists
+          if [ -f ".gitignore" ]; then
+            cat .gitignore >> .gitignore.tmp
+          fi
+          sort -u .gitignore.tmp > .gitignore
+          rm .gitignore.tmp
+      
       - name: Commit and push to repo
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Update .gitignore
-          if ! grep -q "^gradle-cache/" .gitignore 2>/dev/null; then
-            echo "" >> .gitignore
-            echo "# Gradle cache (optional - remove if you want to commit it)" >> .gitignore
-            echo "# gradle-cache/" >> .gitignore
-            echo "restore-gradle-cache.sh" >> .gitignore
-          fi
-          
-          # Check file sizes
-          echo "Checking for files > 100MB (GitHub limit)..."
-          find gradle-cache -type f -size +90M -exec ls -lh {} \;
-          
-          # Add files (git-lfs will handle large files)
-          git add .gitattributes
-          git add gradle-cache/ restore-gradle-cache.sh
+          # Add files (force add to override .gitignore)
+          git add -f gradle-cache/
+          git add -f restore-gradle-cache.sh
           git add .gitignore
           
           # Check if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Add Gradle dependencies cache [skip ci]"
-            
-            # Push with increased buffer for large files
-            git config http.postBuffer 524288000
+            git commit -m "Add Gradle dependencies cache (excluding super large files) [skip ci]"
             git push origin ${{ github.ref_name }}
             echo "✓ Pushed to repository"
           fi
       
-      - name: Warning about large files
-        if: always()
+      - name: Create alternative download script for missing files
+        run: |
+          cat > download-missing-dependencies.sh << 'EOF'
+          #!/bin/bash
+          echo "Downloading missing Gradle dependencies..."
+          
+          # Generate wrapper if missing
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
+          
+          # Download dependencies
+          ./gradlew dependencies
+          
+          echo "✓ Missing dependencies downloaded"
+          EOF
+          chmod +x download-missing-dependencies.sh
+          
+          git add download-missing-dependencies.sh
+          git commit -m "Add missing dependencies download script [skip ci]" || true
+          git push origin ${{ github.ref_name }} || true
+      
+      - name: Summary
         run: |
           echo "=============================================="
-          echo "⚠️  IMPORTANT NOTE ABOUT LARGE FILES"
+          echo "✅ DEPENDENCIES PUSHED TO REPOSITORY"
           echo "=============================================="
           echo ""
-          echo "If you see errors about files exceeding 100MB,"
-          echo "you NEED to configure Git LFS:"
+          echo "What was committed:"
+          echo "  - Most Gradle caches (< 100MB files)"
+          echo "  - Restore scripts"
           echo ""
-          echo "1. Install Git LFS locally:"
-          echo "   git lfs install"
+          echo "What was NOT committed (exceeds 100MB limit):"
+          echo "  - gradle-api-9.2.1.jar (178MB)"
+          echo "  - instrumented-kotlin-compiler-embeddable-1.9.20.jar (157MB)"
           echo ""
-          echo "2. Track large file types:"
-          echo "   git lfs track 'gradle-cache/**/*.jar'"
-          echo "   git lfs track 'gradle-cache/**/*.aar'"
-          echo "   git lfs track 'gradle-cache/**/*.so'"
+          echo "To restore on a new machine:"
+          echo "  1. Run: ./restore-gradle-cache.sh"
+          echo "  2. Run: ./download-missing-dependencies.sh"
           echo ""
-          echo "3. Re-run this workflow after LFS is set up"
-          echo ""
-          echo "Alternative: Don't commit the cache to the repo"
-          echo "Use the artifact from this workflow instead"
+          echo "Or simply run: ./gradlew build"
+          echo "(Gradle will download missing files automatically)"
           echo "=============================================="
