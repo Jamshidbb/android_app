@@ -32,11 +32,11 @@ jobs:
           # Create gradle.properties if it doesn't exist
           if [ ! -f "gradle.properties" ]; then
             cat > gradle.properties << 'EOF'
-            # Project-wide Gradle settings
-            org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-            android.useAndroidX=true
-            android.enableJetifier=true
-            EOF
+          # Project-wide Gradle settings
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
             echo "gradle.properties created"
           fi
       
@@ -44,23 +44,23 @@ jobs:
         run: |
           if [ ! -f "settings.gradle.kts" ]; then
             cat > settings.gradle.kts << 'EOF'
-            pluginManagement {
-                repositories {
-                    google()
-                    mavenCentral()
-                    gradlePluginPortal()
-                }
-            }
-            dependencyResolutionManagement {
-                repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-                repositories {
-                    google()
-                    mavenCentral()
-                }
-            }
-            rootProject.name = "MyApplication"
-            include(":app")
-            EOF
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "MyApplication"
+          include(":app")
+          EOF
             echo "settings.gradle.kts created"
           fi
       
@@ -68,10 +68,10 @@ jobs:
         run: |
           if [ ! -f "build.gradle.kts" ]; then
             cat > build.gradle.kts << 'EOF'
-            plugins {
-                id("com.android.application") version "8.5.2" apply false
-            }
-            EOF
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+          }
+          EOF
             echo "build.gradle.kts created with AGP 8.5.2"
           else
             # Fix existing build.gradle.kts to use correct AGP version
@@ -84,35 +84,35 @@ jobs:
           mkdir -p app
           if [ ! -f "app/build.gradle.kts" ]; then
             cat > app/build.gradle.kts << 'EOF'
-            plugins {
-                id("com.android.application")
-            }
-            
-            android {
-                namespace = "com.example.myapp"
-                compileSdk = 34
-                
-                defaultConfig {
-                    applicationId = "com.example.myapp"
-                    minSdk = 24
-                    targetSdk = 34
-                    versionCode = 1
-                    versionName = "1.0"
-                }
-                
-                compileOptions {
-                    sourceCompatibility = JavaVersion.VERSION_17
-                    targetCompatibility = JavaVersion.VERSION_17
-                }
-            }
-            
-            dependencies {
-                implementation("androidx.core:core-ktx:1.12.0")
-                implementation("androidx.appcompat:appcompat:1.6.1")
-                implementation("com.google.android.material:material:1.11.0")
-                implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-            }
-            EOF
+          plugins {
+              id("com.android.application")
+          }
+          
+          android {
+              namespace = "com.example.myapp"
+              compileSdk = 34
+              
+              defaultConfig {
+                  applicationId = "com.example.myapp"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+          
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("com.google.android.material:material:1.11.0")
+              implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+          }
+          EOF
             echo "app/build.gradle.kts created"
           fi
       
@@ -157,16 +157,22 @@ jobs:
           mkdir -p gradle-cache
           
           # Zip the entire Gradle cache
-          zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper || true
+          zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper 2>/dev/null || true
           
           # Create checksum
-          sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt
+          sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt 2>/dev/null || echo "No zip file created" > gradle-cache/checksum.txt
           
           # Split into 95MB parts (GitHub's limit is 100MB)
-          cd gradle-cache
-          split -b 95m gradle-cache.zip gradle-cache.zip.part-
-          rm gradle-cache.zip
-          cd ..
+          if [ -f gradle-cache/gradle-cache.zip ]; then
+            cd gradle-cache
+            split -b 95m gradle-cache.zip gradle-cache.zip.part-
+            rm gradle-cache.zip
+            cd ..
+          else
+            echo "Warning: gradle-cache.zip not created, creating empty placeholder"
+            mkdir -p gradle-cache
+            echo "No cache generated" > gradle-cache/README.md
+          fi
           
           # Create restore script
           cat > gradle-cache/restore.sh << 'SCRIPT_EOF'
