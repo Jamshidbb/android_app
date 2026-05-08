@@ -9,7 +9,7 @@ jobs:
   download-dependencies:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Needed to push to the repository
+      contents: write
     
     steps:
       - name: Checkout code
@@ -32,17 +32,24 @@ jobs:
         with:
           gradle-version: '9.2.1'
       
-      - name: Backup and replace build files
+      - name: Setup Git LFS
+        run: |
+          git lfs install
+          git lfs track "gradle-cache/**/*.jar"
+          git lfs track "gradle-cache/**/*.pom"
+          git lfs track "gradle-cache/**/*.aar"
+          git lfs track "gradle-cache/**/*.so"
+          git lfs track "gradle-cache/**/*.dll"
+          git lfs track "gradle-cache/**/*.dylib"
+          git add .gitattributes
+      
+      - name: Create temporary build files
         run: |
           # Backup original files
-          if [ -f "build.gradle.kts" ]; then
-            cp build.gradle.kts build.gradle.kts.original
-          fi
-          if [ -f "settings.gradle.kts" ]; then
-            cp settings.gradle.kts settings.gradle.kts.original
-          fi
+          [ -f "build.gradle.kts" ] && cp build.gradle.kts build.gradle.kts.original
+          [ -f "settings.gradle.kts" ] && cp settings.gradle.kts settings.gradle.kts.original
           
-          # Create settings.gradle.kts with proper plugin management
+          # Create settings.gradle.kts
           cat > settings.gradle.kts << 'EOF'
           pluginManagement {
               repositories {
@@ -73,7 +80,7 @@ jobs:
           }
           EOF
           
-          # Create app/build.gradle.kts with proper configuration
+          # Create app/build.gradle.kts
           mkdir -p app
           cat > app/build.gradle.kts << 'EOF'
           plugins {
@@ -114,109 +121,132 @@ jobs:
               implementation("com.google.android.material:material:1.11.0")
           }
           EOF
-          
-          echo "Created temporary build files"
       
       - name: Download dependencies
         run: |
-          # Use gradle from the setup action (version 9.2.1)
           gradle --no-daemon dependencies || true
           gradle --no-daemon build --dry-run || true
-          
           echo "Dependency download completed"
-          
-          # Show cache size
-          if [ -d "$HOME/.gradle/caches" ]; then
-            echo "Cache size: $(du -sh $HOME/.gradle/caches | cut -f1)"
-          fi
       
-      - name: Prepare dependencies for repository
+      - name: Copy dependencies to repo
         run: |
-          # Create .gradle-cache directory in the repository
-          mkdir -p .gradle-cache
+          # Create gradle-cache directory in repo root
+          mkdir -p gradle-cache
           
-          # Copy caches to repository
+          # Copy Gradle caches to repo (excluding large temp files)
           if [ -d "$HOME/.gradle/caches" ]; then
-            cp -r $HOME/.gradle/caches .gradle-cache/
-            echo "Copied Gradle caches"
+            # Exclude large cache files that can be regenerated
+            rsync -av --exclude='*.lock' \
+                      --exclude='tmp/' \
+                      --exclude='journal-*' \
+                      --exclude='fileHashes.bin' \
+                      --exclude='fileSnapshots.bin' \
+                      --exclude='resourceHashesCache.bin' \
+                      --exclude='buildHistory.bin' \
+                      --exclude='outputFiles.bin' \
+                      $HOME/.gradle/caches/ gradle-cache/caches/
           fi
           
           if [ -d "$HOME/.gradle/wrapper" ]; then
-            cp -r $HOME/.gradle/wrapper .gradle-cache/
-            echo "Copied Gradle wrapper"
+            cp -r $HOME/.gradle/wrapper gradle-cache/
           fi
           
-          # Create a restore script in the repo
-          cat > .gradle-cache/restore.sh << 'EOF'
+          # Create restore script
+          cat > gradle-cache/restore.sh << 'EOF'
           #!/bin/bash
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+          echo "Restoring Gradle dependencies from repo..."
           
-          echo "Restoring Gradle dependencies from repo to ~/.gradle..."
-          
-          # Restore caches to home directory
           if [ -d "$SCRIPT_DIR/caches" ]; then
             mkdir -p "$HOME/.gradle"
             cp -r "$SCRIPT_DIR/caches" "$HOME/.gradle/"
-            echo "✓ Restored Gradle caches"
-          else
-            echo "⚠ No caches directory found"
+            echo "✓ Restored caches"
           fi
           
           if [ -d "$SCRIPT_DIR/wrapper" ]; then
             mkdir -p "$HOME/.gradle"
             cp -r "$SCRIPT_DIR/wrapper" "$HOME/.gradle/"
-            echo "✓ Restored Gradle wrapper"
-          else
-            echo "⚠ No wrapper directory found"
+            echo "✓ Restored wrapper"
           fi
           
-          echo ""
-          echo "✓ Restore complete! Dependencies are now in ~/.gradle"
-          echo "You can verify with: ./gradlew dependencies"
+          echo "✓ Restore complete"
           EOF
+          chmod +x gradle-cache/restore.sh
           
-          chmod +x .gradle-cache/restore.sh
-          
-          # Create setup script for automated restore
-          cat > setup-gradle-cache.sh << 'EOF'
+          # Create restore script at root for easy access
+          cat > restore-gradle-cache.sh << 'EOF'
           #!/bin/bash
-          # Script to restore Gradle cache from repository
-          
-          if [ -f ".gradle-cache/restore.sh" ]; then
-            .gradle-cache/restore.sh
+          if [ -d "gradle-cache" ]; then
+            gradle-cache/restore.sh
           else
-            echo "Error: .gradle-cache directory not found"
-            echo "Please run the Gradle Dependencies workflow first"
-            exit 1
+            echo "Error: gradle-cache directory not found"
           fi
           EOF
+          chmod +x restore-gradle-cache.sh
           
-          chmod +x setup-gradle-cache.sh
+          echo "Dependencies copied to gradle-cache/"
+          echo "Size: $(du -sh gradle-cache 2>/dev/null | cut -f1)"
+      
+      - name: Restore original build files
+        run: |
+          [ -f "build.gradle.kts.original" ] && mv build.gradle.kts.original build.gradle.kts
+          [ -f "settings.gradle.kts.original" ] && mv settings.gradle.kts.original settings.gradle.kts
+          rm -rf app 2>/dev/null || true
+      
+      - name: Commit and push to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Create .gitignore to avoid committing unnecessary files
-          cat > .gradle-cache/.gitignore << 'EOF'
-          # Ignore temporary files
-          *.lock
-          *.tmp
-          tmp/
-          # Keep the structure but ignore large files if needed
-          EOF
+          # Update .gitignore
+          if ! grep -q "^gradle-cache/" .gitignore 2>/dev/null; then
+            echo "" >> .gitignore
+            echo "# Gradle cache (optional - remove if you want to commit it)" >> .gitignore
+            echo "# gradle-cache/" >> .gitignore
+            echo "restore-gradle-cache.sh" >> .gitignore
+          fi
           
-          # Create README
-          cat > .gradle-cache/README.md << 'EOF'
-          # Gradle Dependencies Cache
+          # Check file sizes
+          echo "Checking for files > 100MB (GitHub limit)..."
+          find gradle-cache -type f -size +90M -exec ls -lh {} \;
           
-          This directory contains cached Gradle dependencies for offline builds.
+          # Add files (git-lfs will handle large files)
+          git add .gitattributes
+          git add gradle-cache/ restore-gradle-cache.sh
+          git add .gitignore
           
-          ## Size Warning
-          This directory can be large (hundreds of MB). Consider using Git LFS or 
-          only including it if offline builds are essential.
-          
-          ## Restore Cache
-          ```bash
-          # Run the restore script
-          .gradle-cache/restore.sh
-          
-          # Or use the setup script from root
-          ./setup-gradle-cache.sh
+          # Check if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add Gradle dependencies cache [skip ci]"
+            
+            # Push with increased buffer for large files
+            git config http.postBuffer 524288000
+            git push origin ${{ github.ref_name }}
+            echo "✓ Pushed to repository"
+          fi
+      
+      - name: Warning about large files
+        if: always()
+        run: |
+          echo "=============================================="
+          echo "⚠️  IMPORTANT NOTE ABOUT LARGE FILES"
+          echo "=============================================="
+          echo ""
+          echo "If you see errors about files exceeding 100MB,"
+          echo "you NEED to configure Git LFS:"
+          echo ""
+          echo "1. Install Git LFS locally:"
+          echo "   git lfs install"
+          echo ""
+          echo "2. Track large file types:"
+          echo "   git lfs track 'gradle-cache/**/*.jar'"
+          echo "   git lfs track 'gradle-cache/**/*.aar'"
+          echo "   git lfs track 'gradle-cache/**/*.so'"
+          echo ""
+          echo "3. Re-run this workflow after LFS is set up"
+          echo ""
+          echo "Alternative: Don't commit the cache to the repo"
+          echo "Use the artifact from this workflow instead"
+          echo "=============================================="
