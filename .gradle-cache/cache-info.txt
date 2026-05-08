@@ -1,0 +1,5 @@
+Cache created: Fri May  8 05:43:30 UTC 2026
+Gradle version: 9.2.1
+Repository: Jamshidbb/android_app
+Commit: 13e365a2cb1ae00a6e6906a368356b4ea0bd3b86
+Total modules: 0
