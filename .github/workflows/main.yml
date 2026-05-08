@@ -35,87 +35,84 @@ jobs:
           fi
           
           # Create settings.gradle.kts with proper plugin management
-          printf '%s\n' \
-            'pluginManagement {' \
-            '    repositories {' \
-            '        google()' \
-            '        mavenCentral()' \
-            '        gradlePluginPortal()' \
-            '    }' \
-            '}' \
-            '' \
-            'dependencyResolutionManagement {' \
-            '    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)' \
-            '    repositories {' \
-            '        google()' \
-            '        mavenCentral()' \
-            '        maven("https://jitpack.io")' \
-            '    }' \
-            '}' \
-            '' \
-            'rootProject.name = "temp-project"' \
-            'include(":app")' > settings.gradle.kts
+          cat > settings.gradle.kts << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
           
-          # Create build.gradle.kts (without repository declarations to avoid conflict)
-          printf '%s\n' \
-            'plugins {' \
-            '    id("com.android.application") version "9.0.0" apply false' \
-            '    id("org.jetbrains.kotlin.android") version "1.9.0" apply false' \
-            '}' \
-            '' \
-            'tasks.register("downloadDependencies") {' \
-            '    doLast {' \
-            '        println("Dependencies downloaded successfully")' \
-            '    }' \
-            '}' \
-            '' \
-            'tasks.register("resolveAllDependencies") {' \
-            '    doLast {' \
-            '        configurations.forEach { config ->' \
-            '            if (config.isCanBeResolved) {' \
-            '                try {' \
-            '                    config.files' \
-            '                } catch (e: Exception) {' \
-            '                    println("Could not resolve ${config.name}: ${e.message}")' \
-            '                }' \
-            '            }' \
-            '        }' \
-            '    }' \
-            '}' > build.gradle.kts
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+              repositories {
+                  google()
+                  mavenCentral()
+                  maven("https://jitpack.io")
+              }
+          }
           
-          # Create app/build.gradle.kts (without repositories)
+          rootProject.name = "temp-project"
+          include(":app")
+          EOF
+          
+          # Create root build.gradle.kts
+          cat > build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application") version "8.2.0" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.0" apply false
+          }
+          EOF
+          
+          # Create app/build.gradle.kts with proper configuration
           mkdir -p app
-          printf '%s\n' \
-            'plugins {' \
-            '    id("com.android.application")' \
-            '    id("org.jetbrains.kotlin.android")' \
-            '}' \
-            '' \
-            'android {' \
-            '    namespace = "com.example.temp"' \
-            '    compileSdk = 34' \
-            '' \
-            '    defaultConfig {' \
-            '        applicationId = "com.example.temp"' \
-            '        minSdk = 24' \
-            '        targetSdk = 34' \
-            '        versionCode = 1' \
-            '        versionName = "1.0"' \
-            '    }' \
-            '}' \
-            '' \
-            'dependencies {' \
-            '    implementation("androidx.core:core-ktx:1.12.0")' \
-            '    implementation("androidx.appcompat:appcompat:1.6.1")' \
-            '    implementation("com.google.android.material:material:1.11.0")' \
-            '}' > app/build.gradle.kts
+          cat > app/build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          
+          android {
+              namespace = "com.example.temp"
+              compileSdk = 34
+              
+              defaultConfig {
+                  applicationId = "com.example.temp"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_1_8
+                  targetCompatibility = JavaVersion.VERSION_1_8
+              }
+              kotlinOptions {
+                  jvmTarget = "1.8"
+              }
+          }
+          
+          dependencies {
+              implementation("androidx.core:core-ktx:1.12.0")
+              implementation("androidx.appcompat:appcompat:1.6.1")
+              implementation("com.google.android.material:material:1.11.0")
+          }
+          EOF
           
           echo "Created temporary build files"
       
       - name: Generate Gradle wrapper
         run: |
           if [ ! -f "gradlew" ]; then
-            GRADLE_VERSION="9.2.1"
+            GRADLE_VERSION="8.5"
             wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
             unzip -q gradle-${GRADLE_VERSION}-bin.zip
             ./gradle-${GRADLE_VERSION}/bin/gradle wrapper --gradle-version ${GRADLE_VERSION}
@@ -123,20 +120,26 @@ jobs:
           fi
           chmod +x gradlew
       
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      
       - name: Download dependencies
         run: |
-          echo "Downloading Android plugin and dependencies..."
+          # Make gradlew executable
+          chmod +x gradlew
           
-          # Try to just get the plugin first
-          ./gradlew --no-daemon --stacktrace buildscript 2>&1 | head -100 || true
+          # Download dependencies without building
+          ./gradlew --no-daemon dependencies || true
           
-          # Download dependencies
-          ./gradlew --no-daemon --stacktrace resolveAllDependencies 2>&1 || true
-          
-          # Download specific configurations
-          ./gradlew --no-daemon dependencies --configuration classpath 2>&1 || true
-          ./gradlew --no-daemon dependencies --configuration compileClasspath 2>&1 || true
-          ./gradlew --no-daemon dependencies --configuration runtimeClasspath 2>&1 || true
+          # Force download of all configurations
+          ./gradlew --no-daemon downloadDependencies || true
           
           echo "Dependency download completed"
           
@@ -157,6 +160,7 @@ jobs:
           # Copy build files for reference
           cp settings.gradle.kts .gradle-dependencies/settings.gradle.kts.working 2>/dev/null || true
           cp build.gradle.kts .gradle-dependencies/build.gradle.kts.working 2>/dev/null || true
+          cp app/build.gradle.kts .gradle-dependencies/app.build.gradle.kts.working 2>/dev/null || true
           
           # Copy original files
           cp build.gradle.kts.original .gradle-dependencies/ 2>/dev/null || true
@@ -174,40 +178,23 @@ jobs:
           fi
           
           # Create restore script
-          printf '%s\n' '#!/bin/bash' > .gradle-dependencies/restore.sh
-          printf '%s\n' 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' >> .gradle-dependencies/restore.sh
-          printf '%s\n' 'REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"' >> .gradle-dependencies/restore.sh
-          printf '%s\n' 'echo "Restoring Gradle dependencies..."' >> .gradle-dependencies/restore.sh
-          printf '%s\n' 'if [ -d "$SCRIPT_DIR/gradle" ]; then cp -r "$SCRIPT_DIR/gradle" "$REPO_ROOT/"; fi' >> .gradle-dependencies/restore.sh
-          printf '%s\n' 'if [ -f "$SCRIPT_DIR/gradlew" ]; then cp "$SCRIPT_DIR/gradlew" "$REPO_ROOT/" && chmod +x "$REPO_ROOT/gradlew"; fi' >> .gradle-dependencies/restore.sh
-          printf '%s\n' 'if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then mkdir -p "$HOME/.gradle" && cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"; fi' >> .gradle-dependencies/restore.sh
-          printf '%s\n' 'if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then mkdir -p "$HOME/.gradle" && cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"; fi' >> .gradle-dependencies/restore.sh
-          printf '%s\n' 'echo "Restore complete"' >> .gradle-dependencies/restore.sh
+          cat > .gradle-dependencies/restore.sh << 'EOF'
+          #!/bin/bash
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+          echo "Restoring Gradle dependencies..."
+          if [ -d "$SCRIPT_DIR/gradle" ]; then cp -r "$SCRIPT_DIR/gradle" "$REPO_ROOT/"; fi
+          if [ -f "$SCRIPT_DIR/gradlew" ]; then cp "$SCRIPT_DIR/gradlew" "$REPO_ROOT/" && chmod +x "$REPO_ROOT/gradlew"; fi
+          if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then mkdir -p "$HOME/.gradle" && cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"; fi
+          if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then mkdir -p "$HOME/.gradle" && cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"; fi
+          echo "Restore complete"
+          EOF
           chmod +x .gradle-dependencies/restore.sh
           
-          # Create README
-          printf '%s\n' '# Gradle Dependencies Cache' > .gradle-dependencies/README.md
-          printf '%s\n' '' >> .gradle-dependencies/README.md
-          printf '%s\n' '## Restore' >> .gradle-dependencies/README.md
-          printf '%s\n' '```bash' >> .gradle-dependencies/README.md
-          printf '%s\n' '.gradle-dependencies/restore.sh' >> .gradle-dependencies/README.md
-          printf '%s\n' '```' >> .gradle-dependencies/README.md
-      
-      - name: Upload artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-gradle-cache
-          path: .gradle-dependencies/
-          retention-days: 7
-      
-      - name: Restore original files
-        if: always()
-        run: |
-          if [ -f "build.gradle.kts.original" ]; then
-            mv build.gradle.kts.original build.gradle.kts
-          fi
-          if [ -f "settings.gradle.kts.original" ]; then
-            mv settings.gradle.kts.original settings.gradle.kts
-          fi
-          rm -rf app 2>/dev/null || true
+          # Create restore instructions
+          cat > .gradle-dependencies/README.md << 'EOF'
+          # Gradle Dependencies Cache
+          
+          ## Restore
+          ```bash
+          .gradle-dependencies/restore.sh
