@@ -1,4 +1,4 @@
-name: Cache and Push Gradle Dependencies
+name: Gradle Dependencies
 
 on:
   push:
