@@ -34,17 +34,23 @@ jobs:
       
       - name: Generate Gradle wrapper
         run: |
-          # Generate wrapper using the gradle version from your config
+          # Check if gradlew exists, if not, generate it
           if [ ! -f "gradlew" ]; then
-            # Try to detect gradle version from your configs
-            if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-              echo "Using existing wrapper properties"
-            else
-              echo "Generating wrapper with Gradle 8.5"
-              gradle wrapper --gradle-version 8.5
-            fi
+            echo "gradlew not found, generating wrapper..."
+            # Use the gradle version from your properties file or default to 8.5
+            gradle wrapper --gradle-version 8.5
+            
+            # Also create gradlew.bat for Windows (optional)
+            echo "Wrapper generated"
+          else
+            echo "gradlew already exists"
           fi
+          
+          # Make executable
           chmod +x gradlew
+          
+          # Verify it exists now
+          ls -la gradlew
       
       - name: Download dependencies from your partial configs
         run: |
