@@ -1,4 +1,4 @@
-name: Cache and Push Gradle Dependencies
+name: Gradle Dependencies
 
 on:
   push:
@@ -10,6 +10,11 @@ on:
       - '**/gradle/wrapper/gradle-wrapper.properties'
   workflow_dispatch:
 
+# Add permissions for GITHUB_TOKEN
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   download-and-push-dependencies:
     runs-on: ubuntu-latest
@@ -19,6 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -31,176 +37,216 @@ jobs:
         with:
           gradle-version: wrapper
       
+      - name: Extract Gradle version from wrapper properties
+        id: gradle-version
+        run: |
+          # Read Gradle version from gradle-wrapper.properties
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            DISTRIBUTION_URL=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | cut -d'=' -f2)
+            # Extract version number (e.g., gradle-8.7-bin.zip -> 8.7)
+            GRADLE_VERSION=$(echo "$DISTRIBUTION_URL" | grep -oP 'gradle-\K[0-9.]+' | head -1)
+            echo "version=$GRADLE_VERSION" >> $GITHUB_OUTPUT
+            echo "Using Gradle version: $GRADLE_VERSION"
+          else
+            echo "version=8.5" >> $GITHUB_OUTPUT
+            echo "No gradle-wrapper.properties found, using default 8.5"
+          fi
+      
       - name: Setup gradlew if missing
         run: |
-          # If gradlew doesn't exist, initialize Gradle wrapper
+          # If gradlew doesn't exist, create it using the correct Gradle version
           if [ ! -f "gradlew" ]; then
-            echo "⚠️ gradlew not found, creating minimal wrapper..."
+            echo "Creating gradlew for Gradle ${{ steps.gradle-version.outputs.version }}..."
             
-            # Create directories
             mkdir -p gradle/wrapper
             
-            # Create gradle-wrapper.properties
-            echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
-            echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-            echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.5-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
-            echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
-            echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+            # Check if gradle-wrapper.properties exists
+            if [ ! -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+              echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
+              echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+              echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-${{ steps.gradle-version.outputs.version }}-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
+              echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
+              echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
+            fi
             
-            # Download gradle-wrapper.jar
-            curl -s -L https://github.com/gradle/gradle/raw/v8.5.0/gradle/wrapper/gradle-wrapper.jar -o gradle/wrapper/gradle-wrapper.jar
+            # Download correct gradle-wrapper.jar for this version
+            GRADLE_VERSION=${{ steps.gradle-version.outputs.version }}
+            curl -s -L "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar || \
+            curl -s -L "https://github.com/gradle/gradle/raw/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" -o gradle/wrapper/gradle-wrapper.jar || \
+            curl -s -L "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip && \
+            unzip -q /tmp/gradle.zip -d /tmp/ && \
+            cp /tmp/gradle-${GRADLE_VERSION}/lib/plugins/gradle-wrapper.jar* gradle/wrapper/gradle-wrapper.jar 2>/dev/null || true
             
-            # Create simple gradlew script
+            # Create gradlew script
             echo '#!/bin/sh' > gradlew
             echo 'java -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"' >> gradlew
-            
-            # Make executable
             chmod +x gradlew
             
-            echo "✅ Minimal gradlew created"
+            echo "✅ Created gradlew for Gradle ${{ steps.gradle-version.outputs.version }}"
           else
-            echo "✅ gradlew already exists"
             chmod +x gradlew
           fi
-          
-          echo "gradlew is ready"
-          ./gradlew --version || echo "⚠️ Gradle wrapper test had issues, but continuing..."
       
       - name: Download dependencies
         run: |
-          echo "Downloading dependencies..."
+          echo "Downloading dependencies with Gradle ${{ steps.gradle-version.outputs.version }}..."
           
-          # Download dependencies using various methods
+          # Download dependencies
           ./gradlew build --dry-run 2>&1 || true
           ./gradlew dependencies 2>&1 || true
           
-          # Try to download all configurations
+          # Download all configurations
           ./gradlew dependencyInsight --all 2>&1 || true
-          
-          # Alternative: create and run a dependency resolution script
-          cat > resolve-deps.gradle << 'EOF'
-          task resolveAllDependencies {
-              doLast {
-                  def allConfigs = configurations
-                      .findAll { it.canBeResolved }
-                      .collect { it.name }
-                  
-                  allConfigs.each { configName ->
-                      try {
-                          println "Resolving configuration: $configName"
-                          def files = configurations.getByName(configName).files
-                          println "  Resolved ${files.size()} files"
-                      } catch (Exception e) {
-                          println "  Could not resolve: ${e.message}"
-                      }
-                  }
-              }
-          }
-          EOF
-          
-          ./gradlew resolveAllDependencies 2>&1 || true
       
-      - name: Cache Gradle dependencies
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.gradle/caches/modules-2
-            ~/.gradle/wrapper/dists
-          key: gradle-cache-${{ runner.os }}-${{ hashFiles('**/build.gradle', '**/build.gradle.kts', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-cache-${{ runner.os }}-
-      
-      - name: Copy cache to artifact directory
+      - name: Save Gradle cache to branch
         run: |
-          mkdir -p gradle-cache-artifact
+          # Configure git with token for authentication
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Use the GITHUB_TOKEN for authentication
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          
+          # Create or switch to cache branch
+          if git ls-remote --heads origin gradle-cache-branch | grep -q gradle-cache-branch; then
+            git fetch origin gradle-cache-branch
+            git checkout gradle-cache-branch || git checkout -b gradle-cache-branch origin/gradle-cache-branch
+          else
+            git checkout --orphan gradle-cache-branch
+            git rm -rf . 2>/dev/null || true
+          fi
+          
+          # Create cache directory
+          rm -rf .gradle-cache
+          mkdir -p .gradle-cache
           
           # Copy Gradle caches
           if [ -d ~/.gradle/caches/modules-2 ]; then
-            cp -r ~/.gradle/caches/modules-2 gradle-cache-artifact/caches/
+            mkdir -p .gradle-cache/caches
+            cp -r ~/.gradle/caches/modules-2 .gradle-cache/caches/
             echo "✅ Copied modules cache"
           fi
           
           if [ -d ~/.gradle/wrapper/dists ]; then
-            cp -r ~/.gradle/wrapper/dists gradle-cache-artifact/wrapper/
+            cp -r ~/.gradle/wrapper/dists .gradle-cache/wrapper/
             echo "✅ Copied wrapper distributions"
           fi
           
           # Copy wrapper files
-          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-            mkdir -p gradle-cache-artifact/gradle/wrapper
-            cp gradle/wrapper/gradle-wrapper.properties gradle-cache-artifact/gradle/wrapper/
-          fi
-          
-          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            cp gradle/wrapper/gradle-wrapper.jar gradle-cache-artifact/gradle/wrapper/
+          if [ -d "gradle/wrapper" ]; then
+            mkdir -p .gradle-cache/gradle
+            cp -r gradle/wrapper .gradle-cache/gradle/
           fi
           
           if [ -f "gradlew" ]; then
-            cp gradlew gradle-cache-artifact/
+            cp gradlew .gradle-cache/
           fi
           
           # Create metadata
-          echo "Cache created: $(date)" > gradle-cache-artifact/cache-info.txt
-          echo "Gradle version: $(./gradlew --version | head -1)" >> gradle-cache-artifact/cache-info.txt
+          cat > .gradle-cache/cache-info.txt << EOF
+          Cache created: $(date)
+          Gradle version: ${{ steps.gradle-version.outputs.version }}
+          Repository: ${{ github.repository }}
+          Commit: ${{ github.sha }}
+          Total modules: $(find .gradle-cache/caches -name "*.jar" 2>/dev/null | wc -l)
+          EOF
           
           # Create install script
-          echo '#!/bin/bash' > gradle-cache-artifact/install.sh
-          echo 'echo "Installing Gradle cache..."' >> gradle-cache-artifact/install.sh
-          echo 'mkdir -p ~/.gradle' >> gradle-cache-artifact/install.sh
-          echo '' >> gradle-cache-artifact/install.sh
-          echo '# Backup existing cache' >> gradle-cache-artifact/install.sh
-          echo 'if [ -d ~/.gradle/caches ] && [ ! -L ~/.gradle/caches ]; then' >> gradle-cache-artifact/install.sh
-          echo '  mv ~/.gradle/caches ~/.gradle/caches.backup.$(date +%s)' >> gradle-cache-artifact/install.sh
-          echo 'fi' >> gradle-cache-artifact/install.sh
-          echo '' >> gradle-cache-artifact/install.sh
-          echo '# Link cache' >> gradle-cache-artifact/install.sh
-          echo 'if [ -d "$(pwd)/caches" ]; then' >> gradle-cache-artifact/install.sh
-          echo '  ln -sfn "$(pwd)/caches" ~/.gradle/caches' >> gradle-cache-artifact/install.sh
-          echo '  echo "✅ Cache linked"' >> gradle-cache-artifact/install.sh
-          echo 'fi' >> gradle-cache-artifact/install.sh
-          echo '' >> gradle-cache-artifact/install.sh
-          echo '# Link wrapper distributions' >> gradle-cache-artifact/install.sh
-          echo 'if [ -d "$(pwd)/wrapper" ]; then' >> gradle-cache-artifact/install.sh
-          echo '  ln -sfn "$(pwd)/wrapper" ~/.gradle/wrapper' >> gradle-cache-artifact/install.sh
-          echo '  echo "✅ Wrapper distributions linked"' >> gradle-cache-artifact/install.sh
-          echo 'fi' >> gradle-cache-artifact/install.sh
+          cat > .gradle-cache/install.sh << 'INSTALLSCRIPT'
+          #!/bin/bash
+          echo "Installing Gradle cache from branch..."
           
-          chmod +x gradle-cache-artifact/install.sh
+          # Get the directory where this script is located
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           
-          echo "✅ Cache artifact prepared"
-      
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-cache
-          path: gradle-cache-artifact/
-          retention-days: 30
-      
-      - name: Push to cache branch
-        if: github.event_name != 'pull_request'
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # Create symlinks
+          mkdir -p ~/.gradle
           
-          # Create a simple cache branch
-          git checkout --orphan gradle-cache-branch
-          git rm -rf . 2>/dev/null || true
+          # Backup existing caches if not already backed up
+          if [ -d ~/.gradle/caches ] && [ ! -L ~/.gradle/caches ]; then
+            echo "Backing up existing cache to ~/.gradle/caches.backup.$(date +%s)"
+            mv ~/.gradle/caches ~/.gradle/caches.backup.$(date +%s)
+          fi
           
-          # Copy the cache
-          mkdir -p .gradle-cache
-          cp -r gradle-cache-artifact/* .gradle-cache/
+          if [ -d ~/.gradle/wrapper ] && [ ! -L ~/.gradle/wrapper ]; then
+            echo "Backing up existing wrapper to ~/.gradle/wrapper.backup.$(date +%s)"
+            mv ~/.gradle/wrapper ~/.gradle/wrapper.backup.$(date +%s)
+          fi
           
-          # Add a README
-          echo "# Gradle Cache" > README.md
-          echo "This branch contains cached Gradle dependencies." >> README.md
-          echo "" >> README.md
-          echo "## Usage" >> README.md
-          echo "1. Clone this branch: \`git clone --branch gradle-cache-branch <repo-url> gradle-cache\`" >> README.md
-          echo "2. Run \`cd gradle-cache && ./install.sh\`" >> README.md
-          echo "3. Build your project: \`./gradlew build\`" >> README.md
+          # Create symlinks
+          if [ -d "$SCRIPT_DIR/caches" ]; then
+            ln -sfn "$SCRIPT_DIR/caches" ~/.gradle/caches
+            echo "✅ Linked dependency cache"
+          fi
           
+          if [ -d "$SCRIPT_DIR/wrapper" ]; then
+            ln -sfn "$SCRIPT_DIR/wrapper" ~/.gradle/wrapper
+            echo "✅ Linked wrapper distributions"
+          fi
+          
+          # Copy wrapper files to project if needed
+          if [ -d "$SCRIPT_DIR/gradle/wrapper" ] && [ ! -d "gradle/wrapper" ]; then
+            mkdir -p gradle
+            cp -r "$SCRIPT_DIR/gradle/wrapper" gradle/
+            echo "✅ Copied wrapper files"
+          fi
+          
+          if [ -f "$SCRIPT_DIR/gradlew" ] && [ ! -f "gradlew" ]; then
+            cp "$SCRIPT_DIR/gradlew" .
+            chmod +x gradlew
+            echo "✅ Copied gradlew script"
+          fi
+          
+          echo ""
+          echo "=== Cache Information ==="
+          cat "$SCRIPT_DIR/cache-info.txt"
+          echo ""
+          echo "✅ Setup complete! You can now run: ./gradlew build"
+          INSTALLSCRIPT
+          
+          chmod +x .gradle-cache/install.sh
+          
+          # Create README
+          cat > README.md << EOF
+          # Gradle Cache Branch
+          
+          This branch contains cached Gradle dependencies for the project.
+          
+          ## Usage
+          
+          ### In GitHub Actions
+          The cache is automatically used when running workflows.
+          
+          ### Locally
+          1. Checkout this branch:
+             \`\`\`bash
+             git checkout gradle-cache-branch
+             \`\`\`
+          
+          2. Run the installer:
+             \`\`\`bash
+             ./.gradle-cache/install.sh
+             \`\`\`
+          
+          3. Switch back to your working branch and build:
+             \`\`\`bash
+             git checkout -
+             ./gradlew build
+             \`\`\`
+          
+          ## Cache Info
+          - Gradle Version: ${{ steps.gradle-version.outputs.version }}
+          - Created: $(date)
+          - From Commit: ${{ github.sha }}
+          EOF
+          
+          # Add and commit
           git add .gradle-cache README.md
-          git commit -m "Gradle cache from $(date -u '+%Y-%m-%d')"
-          git push origin gradle-cache-branch --force
           
-          echo "✅ Pushed to gradle-cache-branch"
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update Gradle cache - $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            git push origin gradle-cache-branch --force
+            echo "✅ Successfully pushed to gradle-cache-branch"
+          fi
