@@ -35,7 +35,7 @@ jobs:
           fi
           
           # Create a working settings.gradle.kts with proper repositories
-          cat > settings.gradle.kts << 'EOF'
+          cat > settings.gradle.kts << 'SETTINGS_EOF'
           pluginManagement {
               repositories {
                   google()
@@ -55,10 +55,10 @@ jobs:
           
           rootProject.name = "temp-project"
           include(":app")
-          EOF
+          SETTINGS_EOF
           
           # Create a working build.gradle.kts
-          cat > build.gradle.kts << 'EOF'
+          cat > build.gradle.kts << 'BUILD_EOF'
           plugins {
               id("com.android.application") version "9.0.0" apply false
               id("org.jetbrains.kotlin.android") version "1.9.0" apply false
@@ -91,12 +91,12 @@ jobs:
                   }
               }
           }
-          EOF
+          BUILD_EOF
           
           # Create minimal app/build.gradle.kts if needed
           mkdir -p app
           if [ ! -f "app/build.gradle.kts" ]; then
-            cat > app/build.gradle.kts << 'EOF'
+            cat > app/build.gradle.kts << 'APP_EOF'
             plugins {
                 id("com.android.application")
                 id("org.jetbrains.kotlin.android")
@@ -120,7 +120,7 @@ jobs:
                 implementation("androidx.appcompat:appcompat:1.6.1")
                 implementation("com.google.android.material:material:1.11.0")
             }
-            EOF
+            APP_EOF
           fi
           
           echo "✅ Created temporary build files with proper Android plugin configuration"
@@ -163,16 +163,14 @@ jobs:
             echo "📊 Gradle Cache Statistics:"
             echo "  Total size: $(du -sh $HOME/.gradle/caches | cut -f1)"
             echo "  Modules cached: $(find $HOME/.gradle/caches/modules-2/files-2.1 -type f -name "*.jar" 2>/dev/null | wc -l) JAR files"
-            echo "  Android plugin: $(find $HOME/.gradle/caches -name "*android*" -type f 2>/dev/null | wc -l) files"
           fi
       
       - name: Verify Android plugin was downloaded
         run: |
           if find $HOME/.gradle/caches -name "*android*gradle*plugin*" -type f 2>/dev/null | grep -q .; then
             echo "✅ Android Gradle plugin successfully downloaded"
-            find $HOME/.gradle/caches -name "*.jar" -path "*/com.android.tools.build/gradle/*" 2>/dev/null | head -5
           else
-            echo "⚠️ Android plugin not found in cache, but continuing..."
+            echo "⚠️ Android plugin not found in cache"
           fi
       
       - name: Package dependencies for distribution
@@ -184,20 +182,17 @@ jobs:
           cp gradlew .gradle-dependencies/ 2>/dev/null || true
           cp gradlew.bat .gradle-dependencies/ 2>/dev/null || true
           
-          # Copy the working build files (these are what users need)
-          cp settings.gradle.kts .gradle-dependencies/settings.gradle.kts.working
-          cp build.gradle.kts .gradle-dependencies/build.gradle.kts.working
-          [ -f "app/build.gradle.kts" ] && cp app/build.gradle.kts .gradle-dependencies/app-build.gradle.kts.working
+          # Copy the working build files
+          cp settings.gradle.kts .gradle-dependencies/settings.gradle.kts.working 2>/dev/null || true
+          cp build.gradle.kts .gradle-dependencies/build.gradle.kts.working 2>/dev/null || true
           
-          # Copy original files if they exist (for reference)
-          [ -f "build.gradle.kts.original" ] && cp build.gradle.kts.original .gradle-dependencies/
-          [ -f "settings.gradle.kts.original" ] && cp settings.gradle.kts.original .gradle-dependencies/
+          # Copy original files if they exist
+          cp build.gradle.kts.original .gradle-dependencies/ 2>/dev/null || true
+          cp settings.gradle.kts.original .gradle-dependencies/ 2>/dev/null || true
           
-          # Copy Gradle caches (compress large directories)
+          # Copy Gradle caches
           if [ -d "$HOME/.gradle/caches" ]; then
             mkdir -p .gradle-dependencies/.gradle
-            echo "📦 Packaging caches (this may take a moment)..."
-            # Only copy essential caches
             cp -r $HOME/.gradle/caches/modules-2 .gradle-dependencies/.gradle/caches/ 2>/dev/null || true
             cp -r $HOME/.gradle/caches/transforms-3 .gradle-dependencies/.gradle/caches/ 2>/dev/null || true
           fi
@@ -207,56 +202,39 @@ jobs:
             cp -r $HOME/.gradle/wrapper .gradle-dependencies/.gradle/
           fi
           
-          # Create comprehensive restore script
-          cat > .gradle-dependencies/restore.sh << 'RESTORE'
+          # Create restore script
+          cat > .gradle-dependencies/restore.sh << 'RESTORE_EOF'
           #!/bin/bash
           set -e
-          
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-          
-          echo "========================================="
-          echo "  Restoring Gradle & Android Dependencies"
-          echo "========================================="
-          
-          # Restore wrapper
-          echo "📁 Restoring Gradle wrapper..."
-          [ -d "$SCRIPT_DIR/gradle" ] && cp -r "$SCRIPT_DIR/gradle" "$REPO_ROOT/"
-          [ -f "$SCRIPT_DIR/gradlew" ] && cp "$SCRIPT_DIR/gradlew" "$REPO_ROOT/" && chmod +x "$REPO_ROOT/gradlew"
-          
-          # Restore caches to user's gradle home
-          echo "📁 Restoring dependency caches..."
+          echo "Restoring Gradle dependencies..."
+          if [ -d "$SCRIPT_DIR/gradle" ]; then
+            cp -r "$SCRIPT_DIR/gradle" "$REPO_ROOT/"
+          fi
+          if [ -f "$SCRIPT_DIR/gradlew" ]; then
+            cp "$SCRIPT_DIR/gradlew" "$REPO_ROOT/"
+            chmod +x "$REPO_ROOT/gradlew"
+          fi
           if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then
             mkdir -p "$HOME/.gradle"
             cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"
-            echo "  ✅ Caches restored ($(du -sh $HOME/.gradle/caches 2>/dev/null | cut -f1))"
           fi
-          
           if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then
             mkdir -p "$HOME/.gradle"
             cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"
-            echo "  ✅ Wrapper distributions restored"
           fi
-          
-          echo ""
-          echo "✅ Restoration complete!"
-          echo ""
-          echo "Note: If your original build files are failing, you can use the working examples:"
-          echo "  - settings.gradle.kts.working"
-          echo "  - build.gradle.kts.working"
-          echo ""
-          echo "To build offline:"
-          echo "  ./gradlew build --offline"
-          RESTORE
+          echo "Restore complete. Run: ./gradlew build --offline"
+          RESTORE_EOF
           
           chmod +x .gradle-dependencies/restore.sh
           
           # Create README
-          cat > .gradle-dependencies/README.md << 'README'
+          cat > .gradle-dependencies/README.md << 'README_EOF'
           # Gradle Dependencies Cache
           
-          This contains pre-downloaded Android Gradle Plugin and dependencies.
+          Contains pre-downloaded Android Gradle Plugin and dependencies.
           
-          ## Quick Restore
+          ## Restore
           ```bash
           .gradle-dependencies/restore.sh
