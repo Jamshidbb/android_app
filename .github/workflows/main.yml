@@ -3,7 +3,7 @@ name: Download Gradle Dependencies
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
   download-dependencies:
@@ -19,12 +19,11 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'  # Adjust based on your project
+          java-version: '17'
       
       - name: Get Gradle Wrapper version
         id: gradle-version
         run: |
-          # Extract distributionUrl from gradle-wrapper.properties
           if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
             DIST_URL=$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties | cut -d'=' -f2)
             GRADLE_VERSION=$(echo $DIST_URL | grep -oP 'gradle-\K[0-9.]+')
@@ -37,87 +36,137 @@ jobs:
       
       - name: Setup Gradle wrapper
         run: |
-          # Download and setup the specific Gradle version from wrapper
           GRADLE_VERSION="${{ steps.gradle-version.outputs.gradle_version }}"
           if [ ! -z "$GRADLE_VERSION" ]; then
             if [ ! -f "gradlew" ]; then
-              echo "Initializing Gradle wrapper..."
-              gradle wrapper --gradle-version $GRADLE_VERSION
+              ./gradlew wrapper --gradle-version $GRADLE_VERSION
             fi
             chmod +x gradlew
           fi
       
-      - name: Download dependencies
+      - name: Create temporary settings for dependency resolution
+        run: |
+          # Backup original files
+          if [ -f "settings.gradle.kts" ]; then
+            cp settings.gradle.kts settings.gradle.kts.bak
+          elif [ -f "settings.gradle" ]; then
+            cp settings.gradle settings.gradle.bak
+          fi
+          
+          # Ensure Google and Maven Central repositories are available
+          if [ -f "settings.gradle.kts" ]; then
+            cat >> settings.gradle.kts << 'EOF'
+            
+            dependencyResolutionManagement {
+                repositories {
+                    google()
+                    mavenCentral()
+                    gradlePluginPortal()
+                }
+            }
+            EOF
+          elif [ -f "settings.gradle" ]; then
+            cat >> settings.gradle << 'EOF'
+            
+            dependencyResolutionManagement {
+                repositories {
+                    google()
+                    mavenCentral()
+                    gradlePluginPortal()
+                }
+            }
+            EOF
+          else
+            # Create settings.gradle if it doesn't exist
+            cat > settings.gradle << 'EOF'
+            dependencyResolutionManagement {
+                repositories {
+                    google()
+                    mavenCentral()
+                    gradlePluginPortal()
+                }
+            }
+            rootProject.name = "temp-project"
+            EOF
+          fi
+      
+      - name: Download dependencies (safe method)
         id: download-deps
         run: |
-          # Make gradlew executable
           chmod +x gradlew
           
-          # Download all dependencies including plugin dependencies
-          ./gradlew dependencies --configuration compileClasspath
-          ./gradlew dependencies --configuration runtimeClasspath
-          ./gradlew dependencies --configuration testCompileClasspath
-          ./gradlew build --dry-run
+          # Download Gradle wrapper distribution
+          ./gradlew --version
           
-          # Force download all dependencies
-          ./gradlew build -x test -x check --no-daemon
+          # Download dependencies without building
+          echo "Downloading dependencies..."
           
-          # Find and list downloaded dependencies
-          echo "Gradle user home: $HOME/.gradle/caches"
+          # Try multiple approaches to download dependencies
+          ./gradlew downloadRepositories || true
+          ./gradlew dependencies --configuration compileClasspath --no-daemon || true
+          ./gradlew dependencies --configuration runtimeClasspath --no-daemon || true
+          ./gradlew dependencies --configuration implementation --no-daemon || true
           
-          # Extract dependency cache path
-          CACHE_PATH="$HOME/.gradle/caches/modules-2/files-2.1"
-          if [ -d "$CACHE_PATH" ]; then
-            echo "Dependencies downloaded to: $CACHE_PATH"
-            du -sh "$CACHE_PATH"
+          # For Android projects
+          ./gradlew dependencies --configuration androidTestCompileClasspath --no-daemon || true
+          ./gradlew dependencies --configuration debugCompileClasspath --no-daemon || true
+          
+          # Download all dependencies through resolve
+          ./gradlew resolveAllDependencies --no-daemon || true
+          
+          # Alternative: Use the dependency insight to trigger downloads
+          ./gradlew build -x test -x lint -x compileDebugJavaWithJavac -x compileReleaseJavaWithJavac --no-daemon --continue || true
+          
+          echo "Dependencies download attempt completed"
+          
+          # Show what was downloaded
+          if [ -d "$HOME/.gradle/caches/modules-2/files-2.1" ]; then
+            echo "Dependencies downloaded to: $HOME/.gradle/caches/modules-2/files-2.1"
+            find $HOME/.gradle/caches/modules-2/files-2.1 -type f -name "*.jar" 2>/dev/null | head -20
           fi
       
       - name: Prepare dependencies for commit
         run: |
-          # Create .gradle-dependencies directory in repo root
           mkdir -p .gradle-dependencies
           
-          # Copy Gradle wrapper (preserve existing if any)
+          # Copy Gradle wrapper
           cp -r gradle .gradle-dependencies/ 2>/dev/null || true
           cp gradlew .gradle-dependencies/ 2>/dev/null || true
           cp gradlew.bat .gradle-dependencies/ 2>/dev/null || true
           
-          # Copy build files needed for dependency resolution
+          # Copy build files
           find . -maxdepth 2 -name "build.gradle*" -exec cp {} .gradle-dependencies/ \; 2>/dev/null || true
           find . -maxdepth 2 -name "settings.gradle*" -exec cp {} .gradle-dependencies/ \; 2>/dev/null || true
           
-          # Copy dependency cache with structure preserved
-          if [ -d "$HOME/.gradle/caches/modules-2/files-2.1" ]; then
-            mkdir -p .gradle-dependencies/.gradle/caches
-            cp -r $HOME/.gradle/caches/modules-2 .gradle-dependencies/.gradle/caches/
-            
-            # Also copy wrapper distribution if exists
-            if [ -d "$HOME/.gradle/wrapper/dists" ]; then
-              mkdir -p .gradle-dependencies/.gradle/wrapper
-              cp -r $HOME/.gradle/wrapper/dists .gradle-dependencies/.gradle/wrapper/
-            fi
+          # Copy dependency cache
+          if [ -d "$HOME/.gradle/caches" ]; then
+            mkdir -p .gradle-dependencies/.gradle
+            cp -r $HOME/.gradle/caches .gradle-dependencies/.gradle/
           fi
           
-          # Create a script to restore dependencies locally
+          if [ -d "$HOME/.gradle/wrapper" ]; then
+            mkdir -p .gradle-dependencies/.gradle
+            cp -r $HOME/.gradle/wrapper .gradle-dependencies/.gradle/
+          fi
+          
+          # Create restore script
           cat > .gradle-dependencies/restore-dependencies.sh << 'EOF'
           #!/bin/bash
-          # Script to restore Gradle dependencies locally
-          
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
           
           echo "Restoring Gradle dependencies from cached files..."
           
-          # Copy Gradle wrapper files back to repo root
-          cp -r "$SCRIPT_DIR"/gradle "$REPO_ROOT"/ 2>/dev/null || true
-          cp "$SCRIPT_DIR"/gradlew "$REPO_ROOT"/ 2>/dev/null || true
+          # Restore wrapper files
+          cp -r "$SCRIPT_DIR"/gradle "$REPO_ROOT"/ 2>/dev/null || echo "No gradle directory to restore"
+          cp "$SCRIPT_DIR"/gradlew "$REPO_ROOT"/ 2>/dev/null || echo "No gradlew to restore"
           cp "$SCRIPT_DIR"/gradlew.bat "$REPO_ROOT"/ 2>/dev/null || true
           
-          # Copy build files
+          # Restore build files
           cp "$SCRIPT_DIR"/build.gradle* "$REPO_ROOT"/ 2>/dev/null || true
           cp "$SCRIPT_DIR"/settings.gradle* "$REPO_ROOT"/ 2>/dev/null || true
           
-          # Restore Gradle caches to user's home
+          # Restore caches
           if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then
             mkdir -p "$HOME/.gradle"
             cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"
@@ -130,28 +179,21 @@ jobs:
             echo "✓ Gradle wrapper distributions restored"
           fi
           
-          # Make gradlew executable
           chmod +x "$REPO_ROOT/gradlew" 2>/dev/null || true
-          
           echo "✓ Dependencies restored successfully!"
-          echo "You can now run './gradlew build' locally without downloading dependencies again."
+          echo "You can now run './gradlew build' locally"
           EOF
           
           chmod +x .gradle-dependencies/restore-dependencies.sh
           
-          # Create installation instruction file
+          # Create usage instructions
           cat > .gradle-dependencies/README.md << 'EOF'
           # Gradle Dependencies Cache
           
-          This directory contains pre-downloaded Gradle dependencies and wrapper distributions.
+          This contains pre-downloaded Gradle dependencies.
           
-          ## Restoring Dependencies Locally
-          
-          To restore these dependencies on your local machine:
-          
+          ## Restore dependencies:
           ```bash
-          # Make the restore script executable
-          chmod +x restore-dependencies.sh
-          
-          # Run the restore script
+          cd .gradle-dependencies
           ./restore-dependencies.sh
+          cd ..
