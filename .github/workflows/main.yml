@@ -30,93 +30,20 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '9.2.1'
+          gradle-version: 'wrapper'  # Uses your gradle-wrapper.properties
       
-      - name: Create temporary build files
-        run: |
-          # Backup original files
-          [ -f "build.gradle.kts" ] && cp build.gradle.kts build.gradle.kts.original
-          [ -f "settings.gradle.kts" ] && cp settings.gradle.kts settings.gradle.kts.original
-          
-          # Create settings.gradle.kts
-          cat > settings.gradle.kts << 'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-              repositories {
-                  google()
-                  mavenCentral()
-                  maven("https://jitpack.io")
-              }
-          }
-          
-          rootProject.name = "temp-project"
-          include(":app")
-          EOF
-          
-          # Create root build.gradle.kts
-          cat > build.gradle.kts << 'EOF'
-          plugins {
-              id("com.android.application") version "8.5.0" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.20" apply false
-          }
-          EOF
-          
-          # Create app/build.gradle.kts
-          mkdir -p app
-          cat > app/build.gradle.kts << 'EOF'
-          plugins {
-              id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-          }
-          
-          android {
-              namespace = "com.example.temp"
-              compileSdk = 34
-              
-              defaultConfig {
-                  applicationId = "com.example.temp"
-                  minSdk = 24
-                  targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
-              }
-              
-              buildTypes {
-                  release {
-                      isMinifyEnabled = false
-                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-                  }
-              }
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-              kotlinOptions {
-                  jvmTarget = "17"
-              }
-          }
-          
-          dependencies {
-              implementation("androidx.core:core-ktx:1.12.0")
-              implementation("androidx.appcompat:appcompat:1.6.1")
-              implementation("com.google.android.material:material:1.11.0")
-          }
-          EOF
-          
-          echo "Created temporary build files"
+      - name: Make Gradlew executable
+        run: chmod +x gradlew
       
-      - name: Download dependencies
+      - name: Download all dependencies
         run: |
-          gradle --no-daemon dependencies || true
-          gradle --no-daemon build --dry-run || true
+          # This will download dependencies from YOUR actual build files
+          ./gradlew build --dry-run
+          ./gradlew dependencies
+          
+          # Download all possible configurations
+          ./gradlew downloadDependencies
+          
           echo "Dependency download completed"
           
           # Show cache size
@@ -126,81 +53,54 @@ jobs:
         run: |
           echo "Zipping Gradle cache..."
           
-          # Create directory for split files
           mkdir -p gradle-cache
           
           # Zip the entire Gradle cache
           zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper
           
-          # Create checksum BEFORE splitting
-          echo "Creating checksum..."
+          # Create checksum
           sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt
           
           # Split into 95MB parts
-          echo "Splitting into 95MB parts..."
           cd gradle-cache
           split -b 95m gradle-cache.zip gradle-cache.zip.part-
-          
-          # Remove the original zip (keep only parts)
           rm gradle-cache.zip
           cd ..
           
-          # Create restore script (inside the same directory)
-          cat > gradle-cache/restore.sh << 'EOF'
+          # Create restore script
+          cat > gradle-cache/restore.sh << 'SCRIPT_EOF'
           #!/bin/bash
-          # Restore Gradle cache from split parts
-          
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           cd "$SCRIPT_DIR"
           
           echo "Restoring Gradle cache from split parts..."
-          
-          # Check if all parts exist
           PART_COUNT=$(ls gradle-cache.zip.part-* 2>/dev/null | wc -l)
           if [ $PART_COUNT -eq 0 ]; then
-              echo "ERROR: No part files found in $(pwd)"
+              echo "ERROR: No part files found"
               exit 1
           fi
           
           echo "Found $PART_COUNT parts"
-          
-          # Combine parts
-          echo "Combining parts..."
           cat gradle-cache.zip.part-* > gradle-cache.zip
           
-          # Verify checksum
-          echo "Verifying checksum..."
           if sha256sum -c checksum.txt 2>/dev/null; then
               echo "✓ Checksum verified"
           else
               echo "WARNING: Checksum verification failed"
           fi
           
-          # Extract to ~/.gradle/
-          echo "Extracting to ~/.gradle/..."
           unzip -q gradle-cache.zip -d $HOME/
-          
-          # Cleanup
           rm gradle-cache.zip
-          
-          echo ""
           echo "✅ Gradle cache restored successfully!"
-          echo "Cache location: ~/.gradle/caches/"
-          echo ""
-          echo "You can now delete this 'gradle-cache' directory if you want:"
-          echo "  rm -rf $SCRIPT_DIR"
-          EOF
+          SCRIPT_EOF
           
           chmod +x gradle-cache/restore.sh
           
-          # Create simple instructions
-          cat > gradle-cache/README.md << 'EOF'
-          # Gradle Cache
+          cat > gradle-cache/README.md << 'README_EOF'
+          # Gradle Cache from Your Repository
           
-          This directory contains the Gradle cache split into 95MB parts.
+          This contains dependencies from YOUR actual build files.
           
           ## Restore Cache
-          
-          Just run:
           ```bash
           ./restore.sh
