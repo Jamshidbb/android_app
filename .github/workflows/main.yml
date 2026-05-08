@@ -27,42 +27,125 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
       
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 'wrapper'
+      - name: Create Gradle properties
+        run: |
+          # Create gradle.properties if it doesn't exist
+          if [ ! -f "gradle.properties" ]; then
+            cat > gradle.properties << 'EOF'
+            # Project-wide Gradle settings
+            org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+            android.useAndroidX=true
+            android.enableJetifier=true
+            EOF
+            echo "gradle.properties created"
+          fi
+      
+      - name: Create settings.gradle.kts
+        run: |
+          if [ ! -f "settings.gradle.kts" ]; then
+            cat > settings.gradle.kts << 'EOF'
+            pluginManagement {
+                repositories {
+                    google()
+                    mavenCentral()
+                    gradlePluginPortal()
+                }
+            }
+            dependencyResolutionManagement {
+                repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+                repositories {
+                    google()
+                    mavenCentral()
+                }
+            }
+            rootProject.name = "MyApplication"
+            include(":app")
+            EOF
+            echo "settings.gradle.kts created"
+          fi
+      
+      - name: Create build.gradle.kts (root)
+        run: |
+          if [ ! -f "build.gradle.kts" ]; then
+            cat > build.gradle.kts << 'EOF'
+            plugins {
+                id("com.android.application") version "8.5.2" apply false
+            }
+            EOF
+            echo "build.gradle.kts created with AGP 8.5.2"
+          else
+            # Fix existing build.gradle.kts to use correct AGP version
+            echo "Updating existing build.gradle.kts..."
+            sed -i 's/version "9.0.0"/version "8.5.2"/g' build.gradle.kts
+          fi
+      
+      - name: Create app/build.gradle.kts
+        run: |
+          mkdir -p app
+          if [ ! -f "app/build.gradle.kts" ]; then
+            cat > app/build.gradle.kts << 'EOF'
+            plugins {
+                id("com.android.application")
+            }
+            
+            android {
+                namespace = "com.example.myapp"
+                compileSdk = 34
+                
+                defaultConfig {
+                    applicationId = "com.example.myapp"
+                    minSdk = 24
+                    targetSdk = 34
+                    versionCode = 1
+                    versionName = "1.0"
+                }
+                
+                compileOptions {
+                    sourceCompatibility = JavaVersion.VERSION_17
+                    targetCompatibility = JavaVersion.VERSION_17
+                }
+            }
+            
+            dependencies {
+                implementation("androidx.core:core-ktx:1.12.0")
+                implementation("androidx.appcompat:appcompat:1.6.1")
+                implementation("com.google.android.material:material:1.11.0")
+                implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+            }
+            EOF
+            echo "app/build.gradle.kts created"
+          fi
       
       - name: Generate Gradle wrapper
         run: |
-          # Check if gradlew exists, if not, generate it
           if [ ! -f "gradlew" ]; then
             echo "gradlew not found, generating wrapper..."
-            # Use the gradle version from your properties file or default to 8.5
+            # Generate wrapper with specific version
             gradle wrapper --gradle-version 8.5
-            
-            # Also create gradlew.bat for Windows (optional)
             echo "Wrapper generated"
           else
             echo "gradlew already exists"
+            ./gradlew wrapper --gradle-version 8.5
           fi
           
           # Make executable
           chmod +x gradlew
           
-          # Verify it exists now
+          # Verify it exists and works
           ls -la gradlew
+          ./gradlew --version
       
-      - name: Download dependencies from your partial configs
+      - name: Download dependencies
         run: |
-          # List what build files exist
           echo "Existing build files:"
           ls -la *.gradle* 2>/dev/null || echo "No root gradle files"
           ls -la app/*.gradle* 2>/dev/null || echo "No app gradle files"
           
-          # Try to sync and download dependencies
-          echo "Downloading dependencies from your configs..."
-          ./gradlew build --dry-run || true
-          ./gradlew dependencies || true
+          echo "Downloading dependencies from configs..."
+          
+          # Try to resolve dependencies
+          ./gradlew build --dry-run --no-daemon || true
+          ./gradlew dependencies --no-daemon || true
           
           echo "Dependency download completed"
           echo "Total cache size: $(du -sh $HOME/.gradle/caches | cut -f1)"
@@ -74,12 +157,12 @@ jobs:
           mkdir -p gradle-cache
           
           # Zip the entire Gradle cache
-          zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper
+          zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper || true
           
           # Create checksum
           sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt
           
-          # Split into 95MB parts
+          # Split into 95MB parts (GitHub's limit is 100MB)
           cd gradle-cache
           split -b 95m gradle-cache.zip gradle-cache.zip.part-
           rm gradle-cache.zip
@@ -119,6 +202,10 @@ jobs:
           # Gradle Cache from Your Partial Configs
           
           This cache was generated using your repository's partial Gradle/Android configurations.
+          
+          ## Requirements
+          - Java 17 or higher
+          - Gradle 8.5 or higher
           
           ## Restore Cache
           ```bash
