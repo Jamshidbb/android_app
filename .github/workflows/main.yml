@@ -1,158 +1,157 @@
-name: Gradle Dependencies
+name: Download Gradle Dependencies
 
 on:
-  workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
-  cache-dependencies:
+  download-dependencies:
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
       
-      - name: Set up JDK
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
           distribution: 'temurin'
+          java-version: '17'  # Adjust based on your project
       
-      - name: Generate Gradle wrapper
+      - name: Get Gradle Wrapper version
+        id: gradle-version
         run: |
-          # Create gradle wrapper directory
-          mkdir -p gradle/wrapper
-          
-          # Download gradle-wrapper.jar
-          cd gradle/wrapper
-          wget -q https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradle/wrapper/gradle-wrapper.jar
-          cd ../..
-          
-          # Create gradle-wrapper.properties
-          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-          
-          # Create gradlew script
-          cat > gradlew << 'EOF'
-          #!/bin/sh
-          set -e
-          # Determine Java command
-          if [ -n "$JAVA_HOME" ] ; then
-              JAVA_CMD="$JAVA_HOME/bin/java"
+          # Extract distributionUrl from gradle-wrapper.properties
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            DIST_URL=$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties | cut -d'=' -f2)
+            GRADLE_VERSION=$(echo $DIST_URL | grep -oP 'gradle-\K[0-9.]+')
+            echo "gradle_version=$GRADLE_VERSION" >> $GITHUB_OUTPUT
+            echo "Found Gradle version: $GRADLE_VERSION"
           else
-              JAVA_CMD="java"
+            echo "No gradle-wrapper.properties found"
+            exit 1
           fi
-          # Run Gradle
-          exec $JAVA_CMD -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
-          EOF
-          
+      
+      - name: Setup Gradle wrapper
+        run: |
+          # Download and setup the specific Gradle version from wrapper
+          GRADLE_VERSION="${{ steps.gradle-version.outputs.gradle_version }}"
+          if [ ! -z "$GRADLE_VERSION" ]; then
+            if [ ! -f "gradlew" ]; then
+              echo "Initializing Gradle wrapper..."
+              gradle wrapper --gradle-version $GRADLE_VERSION
+            fi
+            chmod +x gradlew
+          fi
+      
+      - name: Download dependencies
+        id: download-deps
+        run: |
           # Make gradlew executable
           chmod +x gradlew
           
-          echo "✅ Gradle wrapper created"
-      
-      - name: Verify gradlew works
-        run: |
-          ./gradlew --version
-      
-      - name: Download dependencies
-        run: |
-          # Download dependencies without building
-          ./gradlew build --dry-run 2>&1 || true
-          ./gradlew dependencies 2>&1 || true
-      
-      - name: Prepare cache (dependencies only)
-        run: |
-          mkdir -p offline-cache
+          # Download all dependencies including plugin dependencies
+          ./gradlew dependencies --configuration compileClasspath
+          ./gradlew dependencies --configuration runtimeClasspath
+          ./gradlew dependencies --configuration testCompileClasspath
+          ./gradlew build --dry-run
           
-          # Copy dependency modules
-          if [ -d ~/.gradle/caches/modules-2 ]; then
-            cp -r ~/.gradle/caches/modules-2 offline-cache/
-            echo "✅ Copied modules cache"
+          # Force download all dependencies
+          ./gradlew build -x test -x check --no-daemon
+          
+          # Find and list downloaded dependencies
+          echo "Gradle user home: $HOME/.gradle/caches"
+          
+          # Extract dependency cache path
+          CACHE_PATH="$HOME/.gradle/caches/modules-2/files-2.1"
+          if [ -d "$CACHE_PATH" ]; then
+            echo "Dependencies downloaded to: $CACHE_PATH"
+            du -sh "$CACHE_PATH"
+          fi
+      
+      - name: Prepare dependencies for commit
+        run: |
+          # Create .gradle-dependencies directory in repo root
+          mkdir -p .gradle-dependencies
+          
+          # Copy Gradle wrapper (preserve existing if any)
+          cp -r gradle .gradle-dependencies/ 2>/dev/null || true
+          cp gradlew .gradle-dependencies/ 2>/dev/null || true
+          cp gradlew.bat .gradle-dependencies/ 2>/dev/null || true
+          
+          # Copy build files needed for dependency resolution
+          find . -maxdepth 2 -name "build.gradle*" -exec cp {} .gradle-dependencies/ \; 2>/dev/null || true
+          find . -maxdepth 2 -name "settings.gradle*" -exec cp {} .gradle-dependencies/ \; 2>/dev/null || true
+          
+          # Copy dependency cache with structure preserved
+          if [ -d "$HOME/.gradle/caches/modules-2/files-2.1" ]; then
+            mkdir -p .gradle-dependencies/.gradle/caches
+            cp -r $HOME/.gradle/caches/modules-2 .gradle-dependencies/.gradle/caches/
+            
+            # Also copy wrapper distribution if exists
+            if [ -d "$HOME/.gradle/wrapper/dists" ]; then
+              mkdir -p .gradle-dependencies/.gradle/wrapper
+              cp -r $HOME/.gradle/wrapper/dists .gradle-dependencies/.gradle/wrapper/
+            fi
           fi
           
-          # Copy Android transforms cache
-          if [ -d ~/.gradle/caches/transforms-3 ]; then
-            cp -r ~/.gradle/caches/transforms-3 offline-cache/
-            echo "✅ Copied transforms cache"
-          fi
-          
-          # Copy Kotlin DSL cache
-          if [ -d ~/.gradle/caches/kotlin-dsl ]; then
-            cp -r ~/.gradle/caches/kotlin-dsl offline-cache/
-            echo "✅ Copied Kotlin DSL cache"
-          fi
-          
-          # Create install script
-          cat > offline-cache/install.sh << 'INSTALL'
+          # Create a script to restore dependencies locally
+          cat > .gradle-dependencies/restore-dependencies.sh << 'EOF'
           #!/bin/bash
+          # Script to restore Gradle dependencies locally
+          
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          mkdir -p ~/.gradle/caches
+          REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
           
-          if [ -d "$SCRIPT_DIR/modules-2" ]; then
-            ln -sfn "$SCRIPT_DIR/modules-2" ~/.gradle/caches/modules-2
-            echo "✓ Dependencies linked"
+          echo "Restoring Gradle dependencies from cached files..."
+          
+          # Copy Gradle wrapper files back to repo root
+          cp -r "$SCRIPT_DIR"/gradle "$REPO_ROOT"/ 2>/dev/null || true
+          cp "$SCRIPT_DIR"/gradlew "$REPO_ROOT"/ 2>/dev/null || true
+          cp "$SCRIPT_DIR"/gradlew.bat "$REPO_ROOT"/ 2>/dev/null || true
+          
+          # Copy build files
+          cp "$SCRIPT_DIR"/build.gradle* "$REPO_ROOT"/ 2>/dev/null || true
+          cp "$SCRIPT_DIR"/settings.gradle* "$REPO_ROOT"/ 2>/dev/null || true
+          
+          # Restore Gradle caches to user's home
+          if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then
+            mkdir -p "$HOME/.gradle"
+            cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"
+            echo "✓ Gradle caches restored"
           fi
           
-          if [ -d "$SCRIPT_DIR/transforms-3" ]; then
-            ln -sfn "$SCRIPT_DIR/transforms-3" ~/.gradle/caches/transforms-3
-            echo "✓ Transforms linked"
+          if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then
+            mkdir -p "$HOME/.gradle"
+            cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"
+            echo "✓ Gradle wrapper distributions restored"
           fi
           
-          if [ -d "$SCRIPT_DIR/kotlin-dsl" ]; then
-            ln -sfn "$SCRIPT_DIR/kotlin-dsl" ~/.gradle/caches/kotlin-dsl
-            echo "✓ Kotlin DSL linked"
-          fi
+          # Make gradlew executable
+          chmod +x "$REPO_ROOT/gradlew" 2>/dev/null || true
           
-          echo "Cache installed successfully"
-          INSTALL
+          echo "✓ Dependencies restored successfully!"
+          echo "You can now run './gradlew build' locally without downloading dependencies again."
+          EOF
           
-          chmod +x offline-cache/install.sh
+          chmod +x .gradle-dependencies/restore-dependencies.sh
           
-          echo "Cache size: $(du -sh offline-cache 2>/dev/null)"
-      
-      - name: Push to branch
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          # Create installation instruction file
+          cat > .gradle-dependencies/README.md << 'EOF'
+          # Gradle Dependencies Cache
           
-          # Delete old branch if exists
-          git push origin --delete gradle-cache 2>/dev/null || true
+          This directory contains pre-downloaded Gradle dependencies and wrapper distributions.
           
-          # Create new branch
-          git checkout --orphan gradle-cache
-          git rm -rf . 2>/dev/null || true
+          ## Restoring Dependencies Locally
           
-          # Copy cache
-          cp -r offline-cache/* .
-          rm -rf offline-cache
-          
-          # Create README
-          cat > README.md << 'README'
-          # Gradle Dependency Cache
-          
-          ## Installation
+          To restore these dependencies on your local machine:
           
           ```bash
-          # 1. Checkout this branch
-          git fetch origin gradle-cache
-          git checkout gradle-cache
+          # Make the restore script executable
+          chmod +x restore-dependencies.sh
           
-          # 2. Install cache
-          ./install.sh
-          
-          # 3. Return to your branch
-          git checkout -
-          
-          # 4. Build offline
-          ./gradlew build --offline
+          # Run the restore script
+          ./restore-dependencies.sh
