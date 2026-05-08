@@ -22,65 +22,105 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
       
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: wrapper
-      
-      - name: Download dependencies only (no build)
+      - name: Generate Gradle wrapper
         run: |
+          # Create gradle wrapper directory
+          mkdir -p gradle/wrapper
+          
+          # Download gradle-wrapper.jar
+          cd gradle/wrapper
+          wget -q https://raw.githubusercontent.com/gradle/gradle/v8.5.0/gradle/wrapper/gradle-wrapper.jar
+          cd ../..
+          
+          # Create gradle-wrapper.properties
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+          
+          # Create gradlew script
+          cat > gradlew << 'EOF'
+          #!/bin/sh
+          set -e
+          # Determine Java command
+          if [ -n "$JAVA_HOME" ] ; then
+              JAVA_CMD="$JAVA_HOME/bin/java"
+          else
+              JAVA_CMD="java"
+          fi
+          # Run Gradle
+          exec $JAVA_CMD -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+          EOF
+          
+          # Make gradlew executable
           chmod +x gradlew
-          # This downloads dependencies to ~/.gradle/caches without building
+          
+          echo "✅ Gradle wrapper created"
+      
+      - name: Verify gradlew works
+        run: |
+          ./gradlew --version
+      
+      - name: Download dependencies
+        run: |
+          # Download dependencies without building
           ./gradlew build --dry-run 2>&1 || true
           ./gradlew dependencies 2>&1 || true
       
-      - name: Prepare dependency cache (NO GRADLE DISTRIBUTION)
+      - name: Prepare cache (dependencies only)
         run: |
           mkdir -p offline-cache
           
-          # Only copy the dependency modules, NOT the whole Gradle distribution
+          # Copy dependency modules
           if [ -d ~/.gradle/caches/modules-2 ]; then
             cp -r ~/.gradle/caches/modules-2 offline-cache/
-            echo "✅ Copied dependency modules"
+            echo "✅ Copied modules cache"
           fi
           
-          # Copy transforms cache (Android specific)
+          # Copy Android transforms cache
           if [ -d ~/.gradle/caches/transforms-3 ]; then
-            cp -r ~/.gradle/caches/transforms-3 offline-cache/ 2>/dev/null || true
+            cp -r ~/.gradle/caches/transforms-3 offline-cache/
             echo "✅ Copied transforms cache"
           fi
           
-          # Copy Kotlin DSL cache if exists
+          # Copy Kotlin DSL cache
           if [ -d ~/.gradle/caches/kotlin-dsl ]; then
-            cp -r ~/.gradle/caches/kotlin-dsl offline-cache/ 2>/dev/null || true
+            cp -r ~/.gradle/caches/kotlin-dsl offline-cache/
             echo "✅ Copied Kotlin DSL cache"
           fi
           
-          # Show size and count of cached files
-          JAR_COUNT=$(find offline-cache -name "*.jar" 2>/dev/null | wc -l)
-          CACHE_SIZE=$(du -sh offline-cache 2>/dev/null | cut -f1)
-          echo "📦 Cache contains $JAR_COUNT JAR files, total size: $CACHE_SIZE"
+          # Create install script
+          cat > offline-cache/install.sh << 'INSTALL'
+          #!/bin/bash
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          mkdir -p ~/.gradle/caches
           
-          # Create install script for local use
-          echo '#!/bin/bash' > offline-cache/install.sh
-          echo 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' >> offline-cache/install.sh
-          echo 'mkdir -p ~/.gradle' >> offline-cache/install.sh
-          echo 'if [ -d "$SCRIPT_DIR/modules-2" ]; then' >> offline-cache/install.sh
-          echo '  ln -sfn "$SCRIPT_DIR/modules-2" ~/.gradle/caches/modules-2' >> offline-cache/install.sh
-          echo '  echo "✓ Dependency cache linked"' >> offline-cache/install.sh
-          echo 'fi' >> offline-cache/install.sh
-          echo 'if [ -d "$SCRIPT_DIR/transforms-3" ]; then' >> offline-cache/install.sh
-          echo '  ln -sfn "$SCRIPT_DIR/transforms-3" ~/.gradle/caches/transforms-3' >> offline-cache/install.sh
-          echo '  echo "✓ Transforms cache linked"' >> offline-cache/install.sh
-          echo 'fi' >> offline-cache/install.sh
-          echo 'if [ -d "$SCRIPT_DIR/kotlin-dsl" ]; then' >> offline-cache/install.sh
-          echo '  ln -sfn "$SCRIPT_DIR/kotlin-dsl" ~/.gradle/caches/kotlin-dsl' >> offline-cache/install.sh
-          echo '  echo "✓ Kotlin DSL cache linked"' >> offline-cache/install.sh
-          echo 'fi' >> offline-cache/install.sh
+          if [ -d "$SCRIPT_DIR/modules-2" ]; then
+            ln -sfn "$SCRIPT_DIR/modules-2" ~/.gradle/caches/modules-2
+            echo "✓ Dependencies linked"
+          fi
+          
+          if [ -d "$SCRIPT_DIR/transforms-3" ]; then
+            ln -sfn "$SCRIPT_DIR/transforms-3" ~/.gradle/caches/transforms-3
+            echo "✓ Transforms linked"
+          fi
+          
+          if [ -d "$SCRIPT_DIR/kotlin-dsl" ]; then
+            ln -sfn "$SCRIPT_DIR/kotlin-dsl" ~/.gradle/caches/kotlin-dsl
+            echo "✓ Kotlin DSL linked"
+          fi
+          
+          echo "Cache installed successfully"
+          INSTALL
           
           chmod +x offline-cache/install.sh
+          
+          echo "Cache size: $(du -sh offline-cache 2>/dev/null)"
       
-      - name: Push cache to branch (NO LARGE FILES)
+      - name: Push to branch
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
@@ -89,40 +129,30 @@ jobs:
           # Delete old branch if exists
           git push origin --delete gradle-cache 2>/dev/null || true
           
-          # Create new orphan branch
+          # Create new branch
           git checkout --orphan gradle-cache
           git rm -rf . 2>/dev/null || true
           
-          # Copy only the cache (no gradle distribution)
+          # Copy cache
           cp -r offline-cache/* .
           rm -rf offline-cache
           
           # Create README
-          echo "# Gradle Dependency Cache" > README.md
-          echo "" >> README.md
-          echo "This branch contains pre-downloaded Gradle dependencies (NO Gradle distribution)." >> README.md
-          echo "" >> README.md
-          echo "## Usage" >> README.md
-          echo "" >> README.md
-          echo "1. Checkout this branch:" >> README.md
-          echo "   \`\`\`bash" >> README.md
-          echo "   git fetch origin gradle-cache" >> README.md
-          echo "   git checkout gradle-cache" >> README.md
-          echo "   \`\`\`" >> README.md
-          echo "" >> README.md
-          echo "2. Install the cache:" >> README.md
-          echo "   \`\`\`bash" >> README.md
-          echo "   ./install.sh" >> README.md
-          echo "   \`\`\`" >> README.md
-          echo "" >> README.md
-          echo "3. Return to your working branch and build offline:" >> README.md
-          echo "   \`\`\`bash" >> README.md
-          echo "   git checkout -" >> README.md
-          echo "   ./gradlew build --offline" >> README.md
-          echo "   \`\`\`" >> README.md
+          cat > README.md << 'README'
+          # Gradle Dependency Cache
           
-          git add .
-          git commit -m "Gradle dependency cache $(date +%Y%m%d_%H%M%S)"
-          git push origin gradle-cache --force
+          ## Installation
           
-          echo "✅ Cache pushed to https://github.com/${{ github.repository }}/tree/gradle-cache"
+          ```bash
+          # 1. Checkout this branch
+          git fetch origin gradle-cache
+          git checkout gradle-cache
+          
+          # 2. Install cache
+          ./install.sh
+          
+          # 3. Return to your branch
+          git checkout -
+          
+          # 4. Build offline
+          ./gradlew build --offline
