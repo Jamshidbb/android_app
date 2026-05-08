@@ -4,3 +4,4 @@ gradle-cache.zip.part-ab
 gradle-cache.zip.part-ac
 gradle-cache.zip.part-ad
 manifest.txt
+restore.sh
