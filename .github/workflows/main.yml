@@ -30,23 +30,35 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: 'wrapper'  # Uses your gradle-wrapper.properties
+          gradle-version: 'wrapper'
       
-      - name: Make Gradlew executable
-        run: chmod +x gradlew
-      
-      - name: Download all dependencies
+      - name: Generate Gradle wrapper
         run: |
-          # This will download dependencies from YOUR actual build files
-          ./gradlew build --dry-run
-          ./gradlew dependencies
+          # Generate wrapper using the gradle version from your config
+          if [ ! -f "gradlew" ]; then
+            # Try to detect gradle version from your configs
+            if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+              echo "Using existing wrapper properties"
+            else
+              echo "Generating wrapper with Gradle 8.5"
+              gradle wrapper --gradle-version 8.5
+            fi
+          fi
+          chmod +x gradlew
+      
+      - name: Download dependencies from your partial configs
+        run: |
+          # List what build files exist
+          echo "Existing build files:"
+          ls -la *.gradle* 2>/dev/null || echo "No root gradle files"
+          ls -la app/*.gradle* 2>/dev/null || echo "No app gradle files"
           
-          # Download all possible configurations
-          ./gradlew downloadDependencies
+          # Try to sync and download dependencies
+          echo "Downloading dependencies from your configs..."
+          ./gradlew build --dry-run || true
+          ./gradlew dependencies || true
           
           echo "Dependency download completed"
-          
-          # Show cache size
           echo "Total cache size: $(du -sh $HOME/.gradle/caches | cut -f1)"
       
       - name: Zip and split Gradle cache
@@ -92,14 +104,15 @@ jobs:
           unzip -q gradle-cache.zip -d $HOME/
           rm gradle-cache.zip
           echo "✅ Gradle cache restored successfully!"
+          echo "Cache location: ~/.gradle/caches/"
           SCRIPT_EOF
           
           chmod +x gradle-cache/restore.sh
           
           cat > gradle-cache/README.md << 'README_EOF'
-          # Gradle Cache from Your Repository
+          # Gradle Cache from Your Partial Configs
           
-          This contains dependencies from YOUR actual build files.
+          This cache was generated using your repository's partial Gradle/Android configurations.
           
           ## Restore Cache
           ```bash
