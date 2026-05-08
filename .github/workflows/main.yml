@@ -1,27 +1,19 @@
 name: Gradle Dependencies
 
 on:
-  push:
-    branches: [ main, master, develop ]
-    paths:
-      - '**/build.gradle'
-      - '**/build.gradle.kts'
-      - '**/gradle/libs.versions.toml'
-      - '**/gradle/wrapper/gradle-wrapper.properties'
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger only
 
 permissions:
   contents: write
 
 jobs:
-  download-and-push-dependencies:
+  cache-dependencies:
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Set up JDK
@@ -30,279 +22,176 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
       
-      - name: Extract Gradle version
-        id: gradle-version
+      - name: Create Gradle wrapper
         run: |
-          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-            GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | sed 's/.*gradle-\([0-9.]*\)-.*/\1/')
-            echo "version=$GRADLE_VERSION" >> $GITHUB_OUTPUT
-            echo "Using Gradle version: $GRADLE_VERSION"
-          else
-            echo "version=8.5" >> $GITHUB_OUTPUT
-            echo "Using default Gradle version: 8.5"
-          fi
-      
-      - name: Setup Gradle wrapper properly
-        run: |
-          # Create directories
+          # Create wrapper directory
           mkdir -p gradle/wrapper
           
-          GRADLE_VERSION="${{ steps.gradle-version.outputs.version }}"
+          # Download gradle-wrapper.jar directly
+          curl -L -o gradle/wrapper/gradle-wrapper.jar \
+            "https://github.com/gradle/gradle/raw/v8.5/gradle/wrapper/gradle-wrapper.jar"
           
-          # Check if wrapper jar already exists in project
-          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "✅ Using existing gradle-wrapper.jar from project"
-          else
-            # Download the full Gradle distribution
-            echo "Downloading Gradle $GRADLE_VERSION distribution..."
-            curl -L -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-            
-            # Extract it
-            echo "Extracting Gradle distribution..."
-            unzip -q /tmp/gradle.zip -d /tmp/
-            
-            # Find gradle-wrapper.jar in different possible locations
-            echo "Looking for gradle-wrapper.jar..."
-            
-            # Try different locations where the wrapper jar might be
-            if [ -f "/tmp/gradle-${GRADLE_VERSION}/lib/plugins/gradle-wrapper.jar" ]; then
-              # Gradle 8.x and earlier
-              cp "/tmp/gradle-${GRADLE_VERSION}/lib/plugins/gradle-wrapper.jar" gradle/wrapper/
-              echo "✅ Found in lib/plugins/"
-            elif [ -f "/tmp/gradle-${GRADLE_VERSION}/lib/gradle-wrapper.jar" ]; then
-              # Alternative location
-              cp "/tmp/gradle-${GRADLE_VERSION}/lib/gradle-wrapper.jar" gradle/wrapper/
-              echo "✅ Found in lib/"
-            elif [ -f "/tmp/gradle-${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" ]; then
-              # Source distribution
-              cp "/tmp/gradle-${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/
-              echo "✅ Found in gradle/wrapper/"
-            else
-              # Download wrapper jar directly from GitHub as fallback
-              echo "⚠️ Could not find in extracted distribution, downloading from GitHub..."
-              curl -L -o gradle/wrapper/gradle-wrapper.jar "https://raw.githubusercontent.com/gradle/gradle/v${GRADLE_VERSION}/gradle/wrapper/gradle-wrapper.jar"
-              echo "✅ Downloaded from GitHub"
-            fi
-          fi
+          # Create gradle-wrapper.properties
+          cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
           
-          # Create gradle-wrapper.properties if it doesn't exist
-          if [ ! -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "Creating gradle-wrapper.properties..."
-            echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
-            echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-            echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
-            echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
-            echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-          fi
-          
-          # Create gradlew script
+          # Create gradlew
           cat > gradlew << 'EOF'
           #!/bin/sh
-          # Gradle wrapper script
-          JAVA_CMD="java"
-          if [ -n "$JAVA_HOME" ]; then
-              JAVA_CMD="$JAVA_HOME/bin/java"
-          fi
-          exec $JAVA_CMD -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+          exec java -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
           EOF
           
           chmod +x gradlew
           
-          # Verify the jar file exists
-          if [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
-            JAR_SIZE=$(ls -lh gradle/wrapper/gradle-wrapper.jar | awk '{print $5}')
-            echo "✅ gradle-wrapper.jar present (size: $JAR_SIZE)"
-          else
-            echo "❌ gradle-wrapper.jar not found!"
-            exit 1
-          fi
-          
-          # Test the wrapper
-          echo "Testing gradlew..."
-          ./gradlew --version || echo "⚠️ Gradle wrapper test had issues but continuing..."
+          echo "✅ Gradle wrapper created"
       
-      - name: Download all dependencies
+      - name: Create a simple build.gradle if none exists
+        run: |
+          if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
+            cat > build.gradle << 'EOF'
+            plugins {
+                id 'java'
+            }
+            
+            repositories {
+                mavenCentral()
+                google()
+            }
+            
+            dependencies {
+                // Add your dependencies here
+                implementation 'com.google.code.gson:gson:2.10.1'
+                implementation 'org.apache.commons:commons-lang3:3.12.0'
+            }
+            EOF
+            echo "✅ Created sample build.gradle"
+          fi
+      
+      - name: Download dependencies
         run: |
           echo "Downloading dependencies..."
           
-          # Make sure gradlew is executable
-          chmod +x gradlew
+          # Try to download dependencies
+          ./gradlew downloadDependencies --no-daemon 2>&1 || true
           
-          # Download dependencies using gradle
-          ./gradlew build --dry-run 2>&1 || true
-          ./gradlew dependencies 2>&1 || true
+          # Alternative: Use dependencies task
+          ./gradlew dependencies --no-daemon 2>&1 || true
           
-          # Download all dependency configurations
-          ./gradlew dependencyInsight --all 2>&1 || true
+          # Force download by trying to resolve configurations
+          ./gradlew build --no-daemon --dry-run 2>&1 || true
           
-          # Alternative: use gradle's built-in dependency resolution
-          ./gradlew help --scan 2>&1 || true
-          
-          echo "✅ Dependency download completed"
+          echo "✅ Dependency download attempted"
       
-      - name: Cache Gradle user home
-        uses: actions/cache@v4
-        id: gradle-cache
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ steps.gradle-version.outputs.version }}-${{ hashFiles('**/*.gradle', '**/*.gradle.kts', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-${{ steps.gradle-version.outputs.version }}-
-            ${{ runner.os }}-gradle-
-      
-      - name: Prepare cache for repository
+      - name: Check what was downloaded
         run: |
-          echo "Preparing cache directory for repository..."
+          echo "=== Checking Gradle cache contents ==="
           
-          # Create cache directory
-          mkdir -p gradle-cache-data
+          # Show cache directory structure
+          if [ -d ~/.gradle/caches ]; then
+            echo "Cache directory exists"
+            echo "Size: $(du -sh ~/.gradle/caches | cut -f1)"
+            echo "Number of JAR files: $(find ~/.gradle/caches -name "*.jar" | wc -l)"
+            
+            # List first 20 JARs
+            echo ""
+            echo "Sample of downloaded JARs:"
+            find ~/.gradle/caches -name "*.jar" | head -20
+          else
+            echo "No cache directory found"
+          fi
+      
+      - name: Prepare files for repository
+        run: |
+          # Create a directory for the cache
+          mkdir -p gradle-offline-cache/caches
+          mkdir -p gradle-offline-cache/wrapper
           
           # Copy Gradle caches if they exist
           if [ -d ~/.gradle/caches/modules-2 ]; then
-            mkdir -p gradle-cache-data/caches
-            cp -r ~/.gradle/caches/modules-2 gradle-cache-data/caches/
+            cp -r ~/.gradle/caches/modules-2 gradle-offline-cache/caches/
             echo "✅ Copied modules cache"
-          else
-            echo "⚠️ No modules cache found"
-            mkdir -p gradle-cache-data/caches
           fi
           
+          if [ -d ~/.gradle/caches/jars-9 ]; then
+            cp -r ~/.gradle/caches/jars-9 gradle-offline-cache/caches/ 2>/dev/null || true
+          fi
+          
+          # Copy wrapper distributions
           if [ -d ~/.gradle/wrapper/dists ]; then
-            mkdir -p gradle-cache-data/wrapper
-            cp -r ~/.gradle/wrapper/dists gradle-cache-data/wrapper/
+            cp -r ~/.gradle/wrapper/dists gradle-offline-cache/wrapper/
             echo "✅ Copied wrapper distributions"
           fi
           
-          # Copy wrapper files from project (always include these)
-          if [ -d "gradle/wrapper" ]; then
-            mkdir -p gradle-cache-data/gradle
-            cp -r gradle/wrapper gradle-cache-data/gradle/
-            echo "✅ Copied wrapper files"
-          fi
+          # Copy the wrapper files
+          cp -r gradle/wrapper gradle-offline-cache/
+          cp gradlew gradle-offline-cache/
           
-          if [ -f "gradlew" ]; then
-            cp gradlew gradle-cache-data/
-            echo "✅ Copied gradlew"
-          fi
-          
-          # Count files and size
-          if [ -d "gradle-cache-data" ]; then
-            JAR_COUNT=$(find gradle-cache-data -name "*.jar" 2>/dev/null | wc -l)
-            CACHE_SIZE=$(du -sh gradle-cache-data 2>/dev/null | cut -f1)
-            echo "✅ Cache contains $JAR_COUNT JAR files, total size: $CACHE_SIZE"
-          fi
-      
-      - name: Create setup script
-        run: |
-          cat > gradle-cache-data/setup-cache.sh << 'SETUPSCRIPT'
+          # Create installation script
+          cat > gradle-offline-cache/install.sh << 'INSTALL'
           #!/bin/bash
           echo "========================================="
-          echo "Setting up Gradle Dependency Cache"
+          echo "Installing Gradle Offline Cache"
           echo "========================================="
           
-          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          CACHE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           
-          # Create Gradle user home if it doesn't exist
+          # Create Gradle user home
           mkdir -p ~/.gradle
           
-          # Backup existing caches
+          # Backup existing cache
           if [ -d ~/.gradle/caches ] && [ ! -L ~/.gradle/caches ]; then
-            BACKUP_DIR="~/.gradle/caches.backup.$(date +%s)"
-            echo "Backing up existing cache to $BACKUP_DIR"
-            mv ~/.gradle/caches "$BACKUP_DIR"
+            echo "Backing up existing cache..."
+            mv ~/.gradle/caches ~/.gradle/caches.backup.$(date +%s)
           fi
           
-          if [ -d ~/.gradle/wrapper ] && [ ! -L ~/.gradle/wrapper ]; then
-            BACKUP_WRAPPER="~/.gradle/wrapper.backup.$(date +%s)"
-            echo "Backing up existing wrapper to $BACKUP_WRAPPER"
-            mv ~/.gradle/wrapper "$BACKUP_WRAPPER"
+          # Create symlink to cached dependencies
+          ln -sfn "$CACHE_DIR/caches" ~/.gradle/caches
+          echo "✓ Cached dependencies linked"
+          
+          # Link wrapper distributions
+          if [ -d "$CACHE_DIR/wrapper/dists" ]; then
+            mkdir -p ~/.gradle/wrapper
+            ln -sfn "$CACHE_DIR/wrapper/dists" ~/.gradle/wrapper/dists
+            echo "✓ Wrapper distributions linked"
           fi
           
-          # Remove existing symlinks
-          rm -f ~/.gradle/caches
-          rm -f ~/.gradle/wrapper
-          
-          # Create symlinks
-          if [ -d "$SCRIPT_DIR/caches" ]; then
-            ln -sfn "$SCRIPT_DIR/caches" ~/.gradle/caches
-            echo "✅ Linked dependency cache"
-          fi
-          
-          if [ -d "$SCRIPT_DIR/wrapper" ]; then
-            ln -sfn "$SCRIPT_DIR/wrapper" ~/.gradle/wrapper
-            echo "✅ Linked wrapper distributions"
-          fi
-          
-          # Copy wrapper files to project if they don't exist
-          if [ -d "$SCRIPT_DIR/gradle/wrapper" ]; then
-            mkdir -p gradle
-            cp -r "$SCRIPT_DIR/gradle/wrapper" gradle/ 2>/dev/null || true
-            echo "✅ Copied wrapper files"
-          fi
-          
-          if [ -f "$SCRIPT_DIR/gradlew" ] && [ ! -f "gradlew" ]; then
-            cp "$SCRIPT_DIR/gradlew" .
+          # Copy wrapper to project if needed
+          if [ ! -f "gradlew" ]; then
+            cp "$CACHE_DIR/gradlew" .
             chmod +x gradlew
-            echo "✅ Copied gradlew script"
+            echo "✓ gradlew copied to project"
+          fi
+          
+          if [ ! -d "gradle/wrapper" ]; then
+            mkdir -p gradle
+            cp -r "$CACHE_DIR/wrapper" gradle/
+            echo "✓ Wrapper files copied to project"
           fi
           
           echo ""
-          echo "========================================="
-          echo "Setup complete! You can now run:"
-          echo "  ./gradlew build"
-          echo "========================================="
-          SETUPSCRIPT
+          echo "✓ Installation complete!"
+          echo "You can now build offline: ./gradlew build --offline"
+          INSTALL
           
-          chmod +x gradle-cache-data/setup-cache.sh
-          echo "✅ Setup script created"
-      
-      - name: Push to repository branch
-        run: |
-          # Configure git
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          chmod +x gradle-offline-cache/install.sh
           
-          # Set up authentication
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+          # Create a README
+          cat > gradle-offline-cache/README.md << 'README'
+          # Gradle Offline Cache
           
-          # Create or switch to cache branch
-          CACHE_BRANCH="gradle-dependency-cache"
+          This directory contains pre-downloaded Gradle dependencies.
           
-          if git ls-remote --heads origin "$CACHE_BRANCH" | grep -q "$CACHE_BRANCH"; then
-            echo "Updating existing branch: $CACHE_BRANCH"
-            git fetch origin "$CACHE_BRANCH"
-            git checkout "$CACHE_BRANCH" 2>/dev/null || git checkout -b "$CACHE_BRANCH" "origin/$CACHE_BRANCH"
-          else
-            echo "Creating new branch: $CACHE_BRANCH"
-            git checkout --orphan "$CACHE_BRANCH"
-            git rm -rf . 2>/dev/null || true
-          fi
+          ## Installation
           
-          # Remove old cache if exists
-          rm -rf .gradle-cache 2>/dev/null || true
+          1. Copy this entire directory to your project
+          2. Run `./install.sh`
+          3. Build offline with `./gradlew build --offline`
           
-          # Move new cache
-          if [ -d "gradle-cache-data" ]; then
-            mv gradle-cache-data .gradle-cache
-            echo "✅ Cache directory moved to .gradle-cache"
-          else
-            echo "⚠️ No cache data to move"
-            mkdir -p .gradle-cache
-          fi
-          
-          # Create README
-          cat > README.md << 'README_END'
-          # Gradle Dependency Cache
-          
-          This branch contains pre-downloaded Gradle dependencies for offline builds.
-          
-          ## Quick Start
-          
-          ### Option 1: Use the setup script
+          Or use symlinks:
           ```bash
-          git checkout gradle-dependency-cache
-          ./.gradle-cache/setup-cache.sh
-          git checkout -
-          ./gradlew build
+          ln -sfn $(pwd)/gradle-offline-cache/caches ~/.gradle/caches
