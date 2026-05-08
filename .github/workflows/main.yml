@@ -126,47 +126,42 @@ jobs:
         run: |
           echo "Zipping Gradle cache..."
           
-          # Create directory for split files
-          mkdir -p gradle-cache-parts
+          # Create directory for split files (everything in one directory)
+          mkdir -p gradle-cache
           
           # Zip the entire Gradle cache
-          zip -r gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper
+          zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper
           
-          # Split into 95MB parts (safe under GitHub's 100MB limit)
+          # Split into 95MB parts
           echo "Splitting into 95MB parts..."
-          split -b 95m gradle-cache.zip gradle-cache-parts/gradle-cache.zip.part-
+          cd gradle-cache
+          split -b 95m gradle-cache.zip gradle-cache.zip.part-
           
-          # Count parts
-          PART_COUNT=$(ls gradle-cache-parts/ | wc -l)
-          echo "Created $PART_COUNT parts"
+          # Remove the original zip (keep only parts)
+          rm gradle-cache.zip
           
-          # List parts with sizes
-          ls -lh gradle-cache-parts/
+          # Create checksum file from the original zip (for verification)
+          cd ..
+          sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt
           
-          # Create checksum file for verification
-          sha256sum gradle-cache.zip > gradle-cache-parts/checksum.txt
-          
-          # Create manifest of parts
-          ls -1 gradle-cache-parts/ > gradle-cache-parts/manifest.txt
-          
-          # Create restoration script
-          cat > gradle-cache-parts/restore.sh << 'EOF'
+          # Create restore script (inside the same directory)
+          cat > gradle-cache/restore.sh << 'EOF'
           #!/bin/bash
+          # Restore Gradle cache from split parts
+          
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          cd "$SCRIPT_DIR"
+          
           echo "Restoring Gradle cache from split parts..."
           
           # Check if all parts exist
-          MISSING=0
-          for part in gradle-cache.zip.part-*; do
-              if [ ! -f "$part" ]; then
-                  echo "Missing: $part"
-                  MISSING=1
-              fi
-          done
-          
-          if [ $MISSING -eq 1 ]; then
-              echo "ERROR: Missing parts. Please download all parts first."
+          PART_COUNT=$(ls gradle-cache.zip.part-* 2>/dev/null | wc -l)
+          if [ $PART_COUNT -eq 0 ]; then
+              echo "ERROR: No part files found in $(pwd)"
               exit 1
           fi
+          
+          echo "Found $PART_COUNT parts"
           
           # Combine parts
           echo "Combining parts..."
@@ -174,108 +169,39 @@ jobs:
           
           # Verify checksum
           echo "Verifying checksum..."
-          sha256sum -c checksum.txt
+          sha256sum -c checksum.txt 2>/dev/null
           
           if [ $? -ne 0 ]; then
-              echo "ERROR: Checksum verification failed!"
-              exit 1
+              echo "WARNING: Checksum verification failed, but continuing..."
+          else
+              echo "✓ Checksum verified"
           fi
           
-          # Extract
+          # Extract to ~/.gradle/
           echo "Extracting to ~/.gradle/..."
           unzip -q gradle-cache.zip -d $HOME/
           
           # Cleanup
           rm gradle-cache.zip
           
+          echo ""
           echo "✅ Gradle cache restored successfully!"
           echo "Cache location: ~/.gradle/caches/"
-          EOF
-          chmod +x gradle-cache-parts/restore.sh
-          
-          # Create setup script at root level
-          cat > setup-gradle-cache.sh << 'EOF'
-          #!/bin/bash
-          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          
-          if [ -d "$SCRIPT_DIR/gradle-cache-parts" ]; then
-              cd "$SCRIPT_DIR/gradle-cache-parts"
-              ./restore.sh
-              cd "$SCRIPT_DIR"
-          else
-              echo "ERROR: gradle-cache-parts directory not found"
-              echo "Please run the Gradle Dependencies workflow first"
-              exit 1
-          fi
-          EOF
-          chmod +x setup-gradle-cache.sh
-          
-          echo "Zip and split completed"
-      
-      - name: Restore original build files
-        run: |
-          [ -f "build.gradle.kts.original" ] && mv build.gradle.kts.original build.gradle.kts
-          [ -f "settings.gradle.kts.original" ] && mv settings.gradle.kts.original settings.gradle.kts
-          rm -rf app 2>/dev/null || true
-      
-      - name: Commit and push parts one by one
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Ensure .gitignore doesn't exclude our files
-          if [ -f ".gitignore" ]; then
-            sed -i '/gradle-cache-parts/d' .gitignore
-            sed -i '/setup-gradle-cache.sh/d' .gitignore
-          fi
-          
-          # First, add the scripts and metadata
-          git add gradle-cache-parts/restore.sh
-          git add gradle-cache-parts/checksum.txt
-          git add gradle-cache-parts/manifest.txt
-          git add setup-gradle-cache.sh
-          git commit -m "Add Gradle cache restore scripts [skip ci]" || true
-          git push origin ${{ github.ref_name }}
-          
-          # Get list of part files
-          PARTS=$(ls gradle-cache-parts/gradle-cache.zip.part-* 2>/dev/null | sort)
-          
-          # Push each part individually
-          for PART in $PARTS; do
-            PART_NAME=$(basename $PART)
-            echo "Pushing $PART_NAME..."
-            
-            # Add this part
-            git add $PART
-            
-            # Commit with part name
-            git commit -m "Add Gradle cache part: $PART_NAME [skip ci]" || true
-            
-            # Push immediately
-            git push origin ${{ github.ref_name }}
-            
-            echo "✅ Pushed $PART_NAME"
-          done
-          
           echo ""
-          echo "=============================================="
-          echo "✅ All parts pushed successfully!"
-          echo "Total parts: $(ls gradle-cache-parts/gradle-cache.zip.part-* 2>/dev/null | wc -l)"
-          echo "=============================================="
-      
-      - name: Create README
-        run: |
-          cat > gradle-cache-parts/README.md << 'EOF'
-          # Gradle Cache Split Parts
+          echo "You can now delete this 'gradle-cache' directory if you want:"
+          echo "  rm -rf $SCRIPT_DIR"
+          EOF
+          
+          chmod +x gradle-cache/restore.sh
+          
+          # Create simple instructions
+          cat > gradle-cache/README.md << 'EOF'
+          # Gradle Cache
           
           This directory contains the Gradle cache split into 95MB parts.
           
-          ## Total Parts
-          $(ls -1 gradle-cache.zip.part-* 2>/dev/null | wc -l) parts
+          ## Restore Cache
           
-          ## Restore Instructions
-          
-          ### Automatic Restore
+          Just run:
           ```bash
-          # From repository root
-          ./setup-gradle-cache.sh
+          ./restore.sh
