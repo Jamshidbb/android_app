@@ -30,54 +30,62 @@ jobs:
             echo "gradle_version=$GRADLE_VERSION" >> $GITHUB_OUTPUT
             echo "Found Gradle version: $GRADLE_VERSION"
           else
-            echo "No gradle-wrapper.properties found"
-            exit 1
+            echo "No gradle-wrapper.properties found, using default"
+            echo "gradle_version=8.5" >> $GITHUB_OUTPUT
           fi
       
-      - name: Setup Gradle wrapper
+      - name: Install Gradle (if no wrapper exists)
         run: |
-          GRADLE_VERSION="${{ steps.gradle-version.outputs.gradle_version }}"
-          if [ ! -z "$GRADLE_VERSION" ]; then
-            if [ ! -f "gradlew" ]; then
-              ./gradlew wrapper --gradle-version $GRADLE_VERSION
+          # Check if gradlew exists
+          if [ ! -f "gradlew" ]; then
+            echo "gradlew not found, installing Gradle..."
+            GRADLE_VERSION="${{ steps.gradle-version.outputs.gradle_version }}"
+            
+            # Download and install Gradle
+            wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
+            unzip -q gradle-${GRADLE_VERSION}-bin.zip
+            export PATH=$PATH:$(pwd)/gradle-${GRADLE_VERSION}/bin
+            
+            # Generate wrapper
+            gradle wrapper --gradle-version ${GRADLE_VERSION}
+            
+            # Clean up
+            rm -rf gradle-${GRADLE_VERSION} gradle-${GRADLE_VERSION}-bin.zip
+          fi
+          
+          # Make gradlew executable
+          chmod +x gradlew 2>/dev/null || true
+      
+      - name: Verify gradlew exists
+        run: |
+          if [ -f "gradlew" ]; then
+            echo "✅ gradlew found"
+            ./gradlew --version
+          else
+            echo "❌ gradlew still not found, creating manually..."
+            # Create minimal gradlew script
+            cat > gradlew << 'EOF'
+            #!/bin/sh
+            GRADLE_VERSION="${{ steps.gradle-version.outputs.gradle_version }}"
+            GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-${GRADLE_VERSION}-bin"
+            if [ ! -d "$GRADLE_HOME" ]; then
+              echo "Downloading Gradle ${GRADLE_VERSION}..."
+              mkdir -p "$GRADLE_HOME"
+              wget -q -O gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+              unzip -q gradle.zip -d "$GRADLE_HOME"
+              mv "$GRADLE_HOME/gradle-${GRADLE_VERSION}"/* "$GRADLE_HOME/"
+              rm gradle.zip
             fi
+            exec "$GRADLE_HOME/bin/gradle" "$@"
+            EOF
             chmod +x gradlew
+            ./gradlew --version
           fi
       
       - name: Create temporary settings for dependency resolution
         run: |
-          # Backup original files
-          if [ -f "settings.gradle.kts" ]; then
-            cp settings.gradle.kts settings.gradle.kts.bak
-          elif [ -f "settings.gradle" ]; then
-            cp settings.gradle settings.gradle.bak
-          fi
-          
-          # Ensure Google and Maven Central repositories are available
-          if [ -f "settings.gradle.kts" ]; then
-            cat >> settings.gradle.kts << 'EOF'
-            
-            dependencyResolutionManagement {
-                repositories {
-                    google()
-                    mavenCentral()
-                    gradlePluginPortal()
-                }
-            }
-            EOF
-          elif [ -f "settings.gradle" ]; then
-            cat >> settings.gradle << 'EOF'
-            
-            dependencyResolutionManagement {
-                repositories {
-                    google()
-                    mavenCentral()
-                    gradlePluginPortal()
-                }
-            }
-            EOF
-          else
-            # Create settings.gradle if it doesn't exist
+          # Ensure settings.gradle exists with proper repositories
+          if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
             cat > settings.gradle << 'EOF'
             dependencyResolutionManagement {
                 repositories {
@@ -88,59 +96,64 @@ jobs:
             }
             rootProject.name = "temp-project"
             EOF
+            echo "Created settings.gradle"
+          fi
+          
+          # Add repositories if missing
+          if [ -f "settings.gradle" ]; then
+            if ! grep -q "google()" settings.gradle; then
+              echo -e "\nallprojects {\n    repositories {\n        google()\n        mavenCentral()\n        gradlePluginPortal()\n    }\n}" >> settings.gradle
+            fi
           fi
       
-      - name: Download dependencies (safe method)
+      - name: Download dependencies
         id: download-deps
         run: |
-          chmod +x gradlew
+          # Download dependencies using multiple approaches
+          echo "Downloading Gradle dependencies..."
           
-          # Download Gradle wrapper distribution
-          ./gradlew --version
+          # Approach 1: Just run a simple task
+          ./gradlew help --no-daemon || true
           
-          # Download dependencies without building
-          echo "Downloading dependencies..."
+          # Approach 2: Download all configurations
+          for config in compileClasspath runtimeClasspath implementation testCompileClasspath testRuntimeClasspath androidTestCompileClasspath debugCompileClasspath releaseCompileClasspath; do
+            echo "Downloading configuration: $config"
+            ./gradlew dependencies --configuration $config --no-daemon 2>/dev/null || true
+          done
           
-          # Try multiple approaches to download dependencies
-          ./gradlew downloadRepositories || true
-          ./gradlew dependencies --configuration compileClasspath --no-daemon || true
-          ./gradlew dependencies --configuration runtimeClasspath --no-daemon || true
-          ./gradlew dependencies --configuration implementation --no-daemon || true
+          # Approach 3: Use dependency insight for common libraries
+          ./gradlew dependencyInsight --dependency junit --no-daemon 2>/dev/null || true
           
-          # For Android projects
-          ./gradlew dependencies --configuration androidTestCompileClasspath --no-daemon || true
-          ./gradlew dependencies --configuration debugCompileClasspath --no-daemon || true
+          # Approach 4: Try to resolve all dependencies
+          ./gradlew resolveAllDependencies --no-daemon 2>/dev/null || true
           
-          # Download all dependencies through resolve
-          ./gradlew resolveAllDependencies --no-daemon || true
+          # Approach 5: Download plugin dependencies
+          ./gradlew build -x test -x compileJava -x compileKotlin -x compileGroovy --no-daemon --continue 2>/dev/null || true
           
-          # Alternative: Use the dependency insight to trigger downloads
-          ./gradlew build -x test -x lint -x compileDebugJavaWithJavac -x compileReleaseJavaWithJavac --no-daemon --continue || true
+          echo "Dependency download complete"
           
-          echo "Dependencies download attempt completed"
-          
-          # Show what was downloaded
-          if [ -d "$HOME/.gradle/caches/modules-2/files-2.1" ]; then
-            echo "Dependencies downloaded to: $HOME/.gradle/caches/modules-2/files-2.1"
-            find $HOME/.gradle/caches/modules-2/files-2.1 -type f -name "*.jar" 2>/dev/null | head -20
+          # Show cache size
+          if [ -d "$HOME/.gradle/caches" ]; then
+            echo "Gradle cache size:"
+            du -sh $HOME/.gradle/caches
           fi
       
       - name: Prepare dependencies for commit
         run: |
           mkdir -p .gradle-dependencies
           
-          # Copy Gradle wrapper
-          cp -r gradle .gradle-dependencies/ 2>/dev/null || true
-          cp gradlew .gradle-dependencies/ 2>/dev/null || true
+          # Copy wrapper files
+          cp -r gradle .gradle-dependencies/ 2>/dev/null || echo "No gradle wrapper dir"
+          cp gradlew .gradle-dependencies/ 2>/dev/null || echo "No gradlew"
           cp gradlew.bat .gradle-dependencies/ 2>/dev/null || true
           
-          # Copy build files
-          find . -maxdepth 2 -name "build.gradle*" -exec cp {} .gradle-dependencies/ \; 2>/dev/null || true
-          find . -maxdepth 2 -name "settings.gradle*" -exec cp {} .gradle-dependencies/ \; 2>/dev/null || true
+          # Copy build configuration
+          find . -maxdepth 2 \( -name "build.gradle*" -o -name "settings.gradle*" -o -name "gradle.properties" \) -exec cp {} .gradle-dependencies/ \; 2>/dev/null || true
           
-          # Copy dependency cache
+          # Copy Gradle caches
           if [ -d "$HOME/.gradle/caches" ]; then
             mkdir -p .gradle-dependencies/.gradle
+            echo "Copying caches (this may take a while)..."
             cp -r $HOME/.gradle/caches .gradle-dependencies/.gradle/
           fi
           
@@ -155,44 +168,53 @@ jobs:
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
           
-          echo "Restoring Gradle dependencies from cached files..."
+          echo "=== Restoring Gradle Dependencies ==="
           
-          # Restore wrapper files
-          cp -r "$SCRIPT_DIR"/gradle "$REPO_ROOT"/ 2>/dev/null || echo "No gradle directory to restore"
-          cp "$SCRIPT_DIR"/gradlew "$REPO_ROOT"/ 2>/dev/null || echo "No gradlew to restore"
-          cp "$SCRIPT_DIR"/gradlew.bat "$REPO_ROOT"/ 2>/dev/null || true
+          # Restore wrapper
+          if [ -d "$SCRIPT_DIR/gradle" ]; then
+            cp -r "$SCRIPT_DIR/gradle" "$REPO_ROOT/" 2>/dev/null
+            echo "✓ Restored gradle wrapper directory"
+          fi
+          
+          if [ -f "$SCRIPT_DIR/gradlew" ]; then
+            cp "$SCRIPT_DIR/gradlew" "$REPO_ROOT/"
+            chmod +x "$REPO_ROOT/gradlew"
+            echo "✓ Restored gradlew"
+          fi
           
           # Restore build files
-          cp "$SCRIPT_DIR"/build.gradle* "$REPO_ROOT"/ 2>/dev/null || true
-          cp "$SCRIPT_DIR"/settings.gradle* "$REPO_ROOT"/ 2>/dev/null || true
+          for file in "$SCRIPT_DIR"/build.gradle* "$SCRIPT_DIR"/settings.gradle* "$SCRIPT_DIR"/gradle.properties; do
+            if [ -f "$file" ]; then
+              cp "$file" "$REPO_ROOT/" 2>/dev/null
+            fi
+          done
           
-          # Restore caches
+          # Restore Gradle caches
           if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then
             mkdir -p "$HOME/.gradle"
             cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"
-            echo "✓ Gradle caches restored"
+            echo "✓ Restored Gradle caches ($(du -sh $HOME/.gradle/caches | cut -f1))"
           fi
           
           if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then
             mkdir -p "$HOME/.gradle"
             cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"
-            echo "✓ Gradle wrapper distributions restored"
+            echo "✓ Restored Gradle wrapper distributions"
           fi
           
-          chmod +x "$REPO_ROOT/gradlew" 2>/dev/null || true
-          echo "✓ Dependencies restored successfully!"
-          echo "You can now run './gradlew build' locally"
+          echo "=== Restoration Complete ==="
+          echo "You can now run: ./gradlew build"
           EOF
           
           chmod +x .gradle-dependencies/restore-dependencies.sh
           
-          # Create usage instructions
+          # Create README
           cat > .gradle-dependencies/README.md << 'EOF'
           # Gradle Dependencies Cache
           
-          This contains pre-downloaded Gradle dependencies.
+          This directory contains pre-downloaded Gradle dependencies.
           
-          ## Restore dependencies:
+          ## Quick Restore
           ```bash
           cd .gradle-dependencies
           ./restore-dependencies.sh
