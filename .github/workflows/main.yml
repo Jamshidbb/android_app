@@ -8,12 +8,15 @@ on:
 jobs:
   download-dependencies:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to push to the repository
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
       
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -114,16 +117,6 @@ jobs:
           
           echo "Created temporary build files"
       
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-      
       - name: Download dependencies
         run: |
           # Use gradle from the setup action (version 9.2.1)
@@ -137,62 +130,93 @@ jobs:
             echo "Cache size: $(du -sh $HOME/.gradle/caches | cut -f1)"
           fi
       
-      - name: Package dependencies
+      - name: Prepare dependencies for repository
         run: |
-          mkdir -p .gradle-dependencies
+          # Create .gradle-cache directory in the repository
+          mkdir -p .gradle-cache
           
-          # Copy build files for reference
-          cp settings.gradle.kts .gradle-dependencies/settings.gradle.kts.working 2>/dev/null || true
-          cp build.gradle.kts .gradle-dependencies/build.gradle.kts.working 2>/dev/null || true
-          cp app/build.gradle.kts .gradle-dependencies/app.build.gradle.kts.working 2>/dev/null || true
-          
-          # Copy original files
-          cp build.gradle.kts.original .gradle-dependencies/ 2>/dev/null || true
-          cp settings.gradle.kts.original .gradle-dependencies/ 2>/dev/null || true
-          
-          # Copy caches
+          # Copy caches to repository
           if [ -d "$HOME/.gradle/caches" ]; then
-            mkdir -p .gradle-dependencies/.gradle
-            cp -r $HOME/.gradle/caches .gradle-dependencies/.gradle/ 2>/dev/null || true
+            cp -r $HOME/.gradle/caches .gradle-cache/
+            echo "Copied Gradle caches"
           fi
           
           if [ -d "$HOME/.gradle/wrapper" ]; then
-            mkdir -p .gradle-dependencies/.gradle
-            cp -r $HOME/.gradle/wrapper .gradle-dependencies/.gradle/ 2>/dev/null || true
+            cp -r $HOME/.gradle/wrapper .gradle-cache/
+            echo "Copied Gradle wrapper"
           fi
           
-          # Create restore script
-          cat > .gradle-dependencies/restore.sh << 'EOF'
+          # Create a restore script in the repo
+          cat > .gradle-cache/restore.sh << 'EOF'
           #!/bin/bash
           SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          echo "Restoring Gradle dependencies..."
+          REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+          
+          echo "Restoring Gradle dependencies from repo to ~/.gradle..."
           
           # Restore caches to home directory
-          if [ -d "$SCRIPT_DIR/.gradle/caches" ]; then
+          if [ -d "$SCRIPT_DIR/caches" ]; then
             mkdir -p "$HOME/.gradle"
-            cp -r "$SCRIPT_DIR/.gradle/caches" "$HOME/.gradle/"
-            echo "Restored Gradle caches"
+            cp -r "$SCRIPT_DIR/caches" "$HOME/.gradle/"
+            echo "✓ Restored Gradle caches"
+          else
+            echo "⚠ No caches directory found"
           fi
           
-          if [ -d "$SCRIPT_DIR/.gradle/wrapper" ]; then
+          if [ -d "$SCRIPT_DIR/wrapper" ]; then
             mkdir -p "$HOME/.gradle"
-            cp -r "$SCRIPT_DIR/.gradle/wrapper" "$HOME/.gradle/"
-            echo "Restored Gradle wrapper"
+            cp -r "$SCRIPT_DIR/wrapper" "$HOME/.gradle/"
+            echo "✓ Restored Gradle wrapper"
+          else
+            echo "⚠ No wrapper directory found"
           fi
           
-          echo "Restore complete"
           echo ""
-          echo "Note: Make sure your project uses Gradle 9.2.1"
-          echo "You can verify with: gradle --version"
+          echo "✓ Restore complete! Dependencies are now in ~/.gradle"
+          echo "You can verify with: ./gradlew dependencies"
           EOF
-          chmod +x .gradle-dependencies/restore.sh
           
-          # Create restore instructions
-          cat > .gradle-dependencies/README.md << 'EOF'
-          # Gradle Dependencies Cache (Gradle 9.2.1)
+          chmod +x .gradle-cache/restore.sh
           
-          This cache contains downloaded dependencies for Gradle 9.2.1.
+          # Create setup script for automated restore
+          cat > setup-gradle-cache.sh << 'EOF'
+          #!/bin/bash
+          # Script to restore Gradle cache from repository
           
-          ## Restore
+          if [ -f ".gradle-cache/restore.sh" ]; then
+            .gradle-cache/restore.sh
+          else
+            echo "Error: .gradle-cache directory not found"
+            echo "Please run the Gradle Dependencies workflow first"
+            exit 1
+          fi
+          EOF
+          
+          chmod +x setup-gradle-cache.sh
+          
+          # Create .gitignore to avoid committing unnecessary files
+          cat > .gradle-cache/.gitignore << 'EOF'
+          # Ignore temporary files
+          *.lock
+          *.tmp
+          tmp/
+          # Keep the structure but ignore large files if needed
+          EOF
+          
+          # Create README
+          cat > .gradle-cache/README.md << 'EOF'
+          # Gradle Dependencies Cache
+          
+          This directory contains cached Gradle dependencies for offline builds.
+          
+          ## Size Warning
+          This directory can be large (hundreds of MB). Consider using Git LFS or 
+          only including it if offline builds are essential.
+          
+          ## Restore Cache
           ```bash
-          .gradle-dependencies/restore.sh
+          # Run the restore script
+          .gradle-cache/restore.sh
+          
+          # Or use the setup script from root
+          ./setup-gradle-cache.sh
