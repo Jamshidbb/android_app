@@ -22,46 +22,72 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
       
-      - name: Create Gradle wrapper
+      - name: Install Gradle directly
         run: |
-          mkdir -p gradle/wrapper
-          curl -L -o gradle/wrapper/gradle-wrapper.jar "https://github.com/gradle/gradle/raw/v8.5/gradle/wrapper/gradle-wrapper.jar"
-          echo "distributionBase=GRADLE_USER_HOME" > gradle/wrapper/gradle-wrapper.properties
-          echo "distributionPath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-          echo "distributionUrl=https\://services.gradle.org/distributions/gradle-8.5-bin.zip" >> gradle/wrapper/gradle-wrapper.properties
-          echo "zipStoreBase=GRADLE_USER_HOME" >> gradle/wrapper/gradle-wrapper.properties
-          echo "zipStorePath=wrapper/dists" >> gradle/wrapper/gradle-wrapper.properties
-          echo '#!/bin/sh' > gradlew
-          echo 'exec java -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"' >> gradlew
-          chmod +x gradlew
+          # Install Gradle directly instead of using wrapper
+          wget https://services.gradle.org/distributions/gradle-8.5-bin.zip
+          unzip -q gradle-8.5-bin.zip
+          export PATH=$PATH:$(pwd)/gradle-8.5/bin
+          echo "GRADLE_HOME=$(pwd)/gradle-8.5" >> $GITHUB_ENV
+          echo "$(pwd)/gradle-8.5/bin" >> $GITHUB_PATH
+          gradle --version
+      
+      - name: Create build.gradle if not exists
+        run: |
+          if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
+            echo "plugins {" > build.gradle
+            echo "    id 'java'" >> build.gradle
+            echo "}" >> build.gradle
+            echo "" >> build.gradle
+            echo "repositories {" >> build.gradle
+            echo "    mavenCentral()" >> build.gradle
+            echo "    google()" >> build.gradle
+            echo "}" >> build.gradle
+            echo "" >> build.gradle
+            echo "dependencies {" >> build.gradle
+            echo "    implementation 'com.google.code.gson:gson:2.10.1'" >> build.gradle
+            echo "}" >> build.gradle
+          fi
       
       - name: Download dependencies
         run: |
-          ./gradlew dependencies --no-daemon 2>&1 || true
-          ./gradlew build --no-daemon --dry-run 2>&1 || true
+          # Use the installed Gradle, not wrapper
+          gradle dependencies --no-daemon 2>&1 || true
+          gradle build --no-daemon --dry-run 2>&1 || true
       
       - name: Prepare cache
         run: |
           mkdir -p offline-cache/caches
           mkdir -p offline-cache/wrapper
           
+          # Copy Gradle cache
           if [ -d ~/.gradle/caches/modules-2 ]; then
             cp -r ~/.gradle/caches/modules-2 offline-cache/caches/
+            echo "Copied modules cache"
           fi
           
           if [ -d ~/.gradle/wrapper/dists ]; then
             cp -r ~/.gradle/wrapper/dists offline-cache/wrapper/
+            echo "Copied wrapper dists"
           fi
           
-          cp -r gradle/wrapper offline-cache/
-          cp gradlew offline-cache/
+          # Verify cache has files
+          echo "Cache size: $(du -sh offline-cache 2>/dev/null | cut -f1)"
+          echo "JAR count: $(find offline-cache -name '*.jar' 2>/dev/null | wc -l)"
           
+          # Create install script
           echo '#!/bin/bash' > offline-cache/install.sh
           echo 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' >> offline-cache/install.sh
           echo 'mkdir -p ~/.gradle' >> offline-cache/install.sh
-          echo 'ln -sfn "$SCRIPT_DIR/caches" ~/.gradle/caches' >> offline-cache/install.sh
-          echo 'ln -sfn "$SCRIPT_DIR/wrapper/dists" ~/.gradle/wrapper/dists' >> offline-cache/install.sh
-          echo 'echo "Cache installed"' >> offline-cache/install.sh
+          echo 'if [ -d "$SCRIPT_DIR/caches" ]; then' >> offline-cache/install.sh
+          echo '  ln -sfn "$SCRIPT_DIR/caches" ~/.gradle/caches' >> offline-cache/install.sh
+          echo '  echo "✓ Cache linked"' >> offline-cache/install.sh
+          echo 'fi' >> offline-cache/install.sh
+          echo 'if [ -d "$SCRIPT_DIR/wrapper" ]; then' >> offline-cache/install.sh
+          echo '  mkdir -p ~/.gradle/wrapper' >> offline-cache/install.sh
+          echo '  ln -sfn "$SCRIPT_DIR/wrapper" ~/.gradle/wrapper/dists 2>/dev/null || true' >> offline-cache/install.sh
+          echo '  echo "✓ Wrapper linked"' >> offline-cache/install.sh
+          echo 'fi' >> offline-cache/install.sh
           
           chmod +x offline-cache/install.sh
       
@@ -71,12 +97,25 @@ jobs:
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           
+          # Delete old branch if exists
+          git push origin --delete gradle-cache 2>/dev/null || true
+          
+          # Create new branch
           git checkout --orphan gradle-cache
           git rm -rf . 2>/dev/null || true
           
-          mv offline-cache/* .
+          # Move cache files
+          cp -r offline-cache/* .
           rm -rf offline-cache
           
+          # Create README
+          echo "# Gradle Cache" > README.md
+          echo "Created: $(date)" >> README.md
+          echo "JAR files: $(find . -name '*.jar' | wc -l)" >> README.md
+          
           git add .
-          git commit -m "Gradle cache $(date +%Y%m%d)"
+          git commit -m "Gradle cache $(date +%Y%m%d_%H%M%S)"
           git push origin gradle-cache --force
+          
+          echo "✅ Pushed to gradle-cache branch"
+          echo "🔗 https://github.com/${{ github.repository }}/tree/gradle-cache"
