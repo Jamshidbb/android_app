@@ -1,0 +1,10 @@
+===================================
+GRADLE DEPENDENCY CACHE
+===================================
+Created: Fri May  8 05:49:17 UTC 2026
+Gradle Version: 9.2.1
+Repository: Jamshidbb/android_app
+JAR files: 0
+Cache size: 4.0K
+
+Usage: Run setup-cache.sh to install
