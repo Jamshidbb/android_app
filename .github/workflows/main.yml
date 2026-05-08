@@ -126,11 +126,15 @@ jobs:
         run: |
           echo "Zipping Gradle cache..."
           
-          # Create directory for split files (everything in one directory)
+          # Create directory for split files
           mkdir -p gradle-cache
           
           # Zip the entire Gradle cache
           zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper
+          
+          # Create checksum BEFORE splitting
+          echo "Creating checksum..."
+          sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt
           
           # Split into 95MB parts
           echo "Splitting into 95MB parts..."
@@ -139,10 +143,7 @@ jobs:
           
           # Remove the original zip (keep only parts)
           rm gradle-cache.zip
-          
-          # Create checksum file from the original zip (for verification)
           cd ..
-          sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt
           
           # Create restore script (inside the same directory)
           cat > gradle-cache/restore.sh << 'EOF'
@@ -169,12 +170,10 @@ jobs:
           
           # Verify checksum
           echo "Verifying checksum..."
-          sha256sum -c checksum.txt 2>/dev/null
-          
-          if [ $? -ne 0 ]; then
-              echo "WARNING: Checksum verification failed, but continuing..."
-          else
+          if sha256sum -c checksum.txt 2>/dev/null; then
               echo "✓ Checksum verified"
+          else
+              echo "WARNING: Checksum verification failed"
           fi
           
           # Extract to ~/.gradle/
