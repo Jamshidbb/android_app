@@ -1,0 +1,92 @@
+name: Gradle Dependencies
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - '**/build.gradle'
+      - '**/build.gradle.kts'
+      - '**/gradle/libs.versions.toml'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  download-and-push-dependencies:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'  # Adjust to your project's Java version
+          distribution: 'temurin'
+      
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: wrapper  # or specify version like '8.5'
+      
+      - name: Download all dependencies
+        run: |
+          # Download all compile/runtime dependencies
+          ./gradlew dependencies --configuration compileClasspath
+          ./gradlew dependencies --configuration runtimeClasspath
+          
+          # Download all JARs and cache them
+          ./gradlew build --dry-run  # This helps download dependencies without building
+          ./gradlew downloadDependencies  # If using the plugin below
+      
+      - name: Create dependency cache directory
+        run: |
+          mkdir -p gradle-dependency-cache/caches
+          mkdir -p gradle-dependency-cache/wrapper
+      
+      - name: Copy Gradle caches
+        run: |
+          # Copy the entire Gradle cache
+          if [ -d ~/.gradle/caches ]; then
+            cp -r ~/.gradle/caches/* gradle-dependency-cache/caches/
+          fi
+          
+          # Copy Gradle wrapper if exists
+          if [ -d ~/.gradle/wrapper ]; then
+            cp -r ~/.gradle/wrapper/* gradle-dependency-cache/wrapper/
+          fi
+          
+          # Create metadata file
+          echo "Dependencies cached on: $(date)" > gradle-dependency-cache/cache-info.txt
+          echo "Gradle version: $(./gradlew --version | grep 'Gradle:' | awk '{print $2}')" >> gradle-dependency-cache/cache-info.txt
+      
+      - name: Generate dependency list
+        run: |
+          ./gradlew dependencies > gradle-dependency-cache/dependency-list.txt
+          ./gradlew build --dry-run > gradle-dependency-cache/build-dry-run.log 2>&1
+      
+      - name: Upload to repository artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-dependency-cache
+          path: gradle-dependency-cache/
+          retention-days: 90  # Adjust as needed
+      
+      - name: Commit and push to cache branch
+        if: github.event_name != 'pull_request'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          # Create or switch to cache branch
+          git checkout -b gradle-dependency-cache || git checkout gradle-dependency-cache
+          
+          # Move cache to a specific location
+          rm -rf .gradle-cache
+          mv gradle-dependency-cache .gradle-cache
+          
+          # Commit changes
+          git add .gradle-cache/
+          git commit -m "Update Gradle dependency cache - $(date -u '+%Y-%m-%d %H:%M:%S UTC')" || echo "No changes to commit"
+          
+          # Push to remote
+          git push origin gradle-dependency-cache --force
