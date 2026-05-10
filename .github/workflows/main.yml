@@ -366,7 +366,31 @@ jobs:
         </resources>
         EOF
         
-        # Create AndroidManifest.xml
+        # Create themes.xml for the app (required for Android manifest)
+        cat > app/src/main/res/values/themes.xml << 'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <resources>
+            <style name="Theme.TVHClient" parent="android:Theme.Material.Light.NoActionBar">
+                <item name="android:statusBarColor">@color/purple_700</item>
+                <item name="android:windowBackground">@color/white</item>
+            </style>
+            
+            <style name="Theme.TVHClient.Dark" parent="android:Theme.Material.NoActionBar">
+                <item name="android:statusBarColor">@color/black</item>
+                <item name="android:windowBackground">@color/black</item>
+            </style>
+            
+            <color name="purple_200">#FFBB86FC</color>
+            <color name="purple_500">#FF6200EE</color>
+            <color name="purple_700">#FF3700B3</color>
+            <color name="teal_200">#FF03DAC5</color>
+            <color name="teal_700">#FF018786</color>
+            <color name="black">#FF000000</color>
+            <color name="white">#FFFFFFFF</color>
+        </resources>
+        EOF
+        
+        # Create AndroidManifest.xml with proper theme
         cat > app/src/main/AndroidManifest.xml << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -376,7 +400,7 @@ jobs:
                 android:icon="@android:drawable/sym_def_app_icon"
                 android:label="@string/app_name"
                 android:supportsRtl="true"
-                android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+                android:theme="@style/Theme.TVHClient">
                 <activity
                     android:name=".MainActivity"
                     android:exported="true"
