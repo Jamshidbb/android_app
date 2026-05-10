@@ -3,49 +3,123 @@ name: Android Project Setup and Build
 on:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
 
 jobs:
-  build:
+  create-and-build-android-app:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Setup JDK
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-      
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      
-      - name: Create Android project
-        run: |
-          chmod +x scripts/create_android_project.sh
-          ./scripts/create_android_project.sh
-      
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
-      
-      - name: Build project
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
-      
-      - name: Copy artifacts
-        run: |
-          mkdir -p artifacts/latest artifacts/backup
-          cp -r app/build/outputs/apk/* artifacts/latest/
-          cp -r app/build/outputs/apk/* artifacts/backup/
-      
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-build
-          path: artifacts/
+    # Step 1: Checkout the repository
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    # Step 2: Set up JDK 17
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    
+    # Step 3: Set up Android SDK
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        api-level: 34
+        build-tools: 34.0.0
+    
+    # Step 4: Cache Gradle dependencies
+    - name: Cache Gradle packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          ~/.android/build-cache
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-
+    
+    # Step 5: Create Android project (if not exists)
+    - name: Create Android project
+      run: |
+        chmod +x scripts/create-android-project.sh
+        ./scripts/create-android-project.sh
+    
+    # Step 6: Build Android project
+    - name: Build Android project
+      run: |
+        chmod +x scripts/build-android.sh
+        ./scripts/build-android.sh ${{ github.event.inputs.build_type || 'debug' }}
+    
+    # Step 7: Create artifact directories
+    - name: Create artifact directories
+      run: |
+        mkdir -p artifacts/latest
+        mkdir -p artifacts/backup-$(date +'%Y%m%d-%H%M%S')
+    
+    # Step 8: Copy artifacts to both directories
+    - name: Copy build artifacts
+      run: |
+        # Copy to latest directory
+        if [ -d "app/build/outputs/apk" ]; then
+          cp -r app/build/outputs/apk/* artifacts/latest/ 2>/dev/null || true
+          echo "APK files copied to latest/"
+        fi
+        
+        if [ -d "app/build/outputs/bundle" ]; then
+          cp -r app/build/outputs/bundle/* artifacts/latest/ 2>/dev/null || true
+          echo "AAB files copied to latest/"
+        fi
+        
+        # Copy to backup directory with timestamp
+        BACKUP_DIR=$(ls -d artifacts/backup-* | head -1)
+        if [ -d "app/build/outputs/apk" ]; then
+          cp -r app/build/outputs/apk/* $BACKUP_DIR/ 2>/dev/null || true
+        fi
+        
+        if [ -d "app/build/outputs/bundle" ]; then
+          cp -r app/build/outputs/bundle/* $BACKUP_DIR/ 2>/dev/null || true
+        fi
+        
+        # Also copy any APK/AAB files found
+        find app/build -name "*.apk" -o -name "*.aab" | while read file; do
+          cp "$file" artifacts/latest/ 2>/dev/null || true
+          cp "$file" $BACKUP_DIR/ 2>/dev/null || true
+        done
+        
+        echo "Artifacts copied successfully"
+        ls -la artifacts/latest/
+    
+    # Step 9: Upload latest artifacts
+    - name: Upload latest artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-latest-build
+        path: artifacts/latest/
+        retention-days: 7
+    
+    # Step 10: Upload backup artifacts
+    - name: Upload backup artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-backup-build-${{ github.run_id }}
+        path: artifacts/backup-*/
+        retention-days: 30
+    
+    # Step 11: Clean up (optional)
+    - name: Clean up
+      run: |
+        rm -rf artifacts/backup-*/ || true
+        echo "Cleanup completed"
