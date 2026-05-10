@@ -1,4 +1,4 @@
-name: Android Project Setup, Download Dependencies and Build
+name: Build and Push Artifacts
 
 on:
   push:
@@ -447,7 +447,6 @@ jobs:
       run: |
         chmod +x gradlew
         
-        # Download dependencies first
         echo "📦 Downloading dependencies..."
         ./gradlew dependencies --no-daemon || true
         
@@ -463,157 +462,161 @@ jobs:
         
         echo "✅ Build completed!"
     
-    # Step 7: Create artifact directories and track files
-    - name: Create and track artifacts
+    # Step 7: Prepare artifacts for repository
+    - name: Prepare artifacts for repository
       run: |
-        mkdir -p artifacts/all-artifacts
-        
-        TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+        # Create artifacts directory in repo
+        mkdir -p repo-artifacts/build-$(date +'%Y%m%d-%H%M%S')
+        ARTIFACT_DIR="repo-artifacts/build-$(date +'%Y%m%d-%H%M%S')"
         
         # Copy APKs
         if [ -d "app/build/outputs/apk" ]; then
-            cp -r app/build/outputs/apk/* artifacts/all-artifacts/ 2>/dev/null || true
-            echo "✅ APK files copied"
+            cp -r app/build/outputs/apk/* "$ARTIFACT_DIR/" 2>/dev/null || true
+            echo "✅ APK files copied to $ARTIFACT_DIR"
         fi
         
-        # Copy Gradle cache (preserving structure)
+        # Copy gradle cache (preserving structure)
         if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
-            mkdir -p artifacts/all-artifacts/gradle-cache
-            cp -r ~/.gradle/caches/modules-2/files-2.1/* artifacts/all-artifacts/gradle-cache/ 2>/dev/null || true
+            mkdir -p "$ARTIFACT_DIR/gradle-cache"
+            cp -r ~/.gradle/caches/modules-2/files-2.1/* "$ARTIFACT_DIR/gradle-cache/" 2>/dev/null || true
             echo "✅ Gradle cache copied"
         fi
         
-        # Copy project files
-        cp -r app gradle build.gradle.kts settings.gradle.kts gradle.properties gradlew artifacts/all-artifacts/ 2>/dev/null || true
-        
-        # Create manifest of artifacts
-        find artifacts/all-artifacts -type f -exec md5sum {} \; > artifacts/manifest.txt
-        
         # Create version info
-        echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"build_type\":\"${{ github.event.inputs.build_type || 'debug' }}\",\"gradle_version\":\"9.2.1\",\"run_id\":\"${{ github.run_id }}\",\"run_number\":\"${{ github.run_number }}\"}" > artifacts/version-info.json
+        cat > "$ARTIFACT_DIR/version-info.json" << EOF
+        {
+            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "build_type": "${{ github.event.inputs.build_type || 'debug' }}",
+            "gradle_version": "9.2.1",
+            "run_id": "${{ github.run_id }}",
+            "run_number": "${{ github.run_number }}",
+            "commit_sha": "${{ github.sha }}"
+        }
+        EOF
         
         # Create README
-        cat > artifacts/all-artifacts/README.md << 'README_EOF'
-        # Android Build Artifacts
+        cat > "$ARTIFACT_DIR/README.md" << EOF
+        # Android Build Artifacts - $(date +'%Y-%m-%d %H:%M:%S')
         
-        Generated on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        Build Type: ${{ github.event.inputs.build_type || 'debug' }}
+        Gradle Version: 9.2.1
+        Run ID: ${{ github.run_id }}
         
         ## Contents:
-        - APK files in app/build/outputs/
-        - Gradle cache with all Maven dependencies
-        - Complete Android project source
+        - APK files
+        - Gradle cache with all Maven dependencies (preserves structure)
         
         ## To use locally:
-        1. Extract all files
-        2. Run: ./gradlew assembleDebug
-        README_EOF
+        1. Copy gradle-cache to ~/.gradle/caches/
+        2. Install APK: adb install *.apk
+        EOF
         
+        # Create a manifest of all files in this build
+        find "$ARTIFACT_DIR" -type f -exec md5sum {} \; > "$ARTIFACT_DIR/manifest.txt"
+        
+        echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
+        
+        # List all files
         echo "========================================="
-        echo "📊 Artifact Summary:"
+        echo "📦 Artifacts prepared for repository:"
         echo "========================================="
-        echo "Artifacts directory: artifacts/all-artifacts/"
-        echo "Manifest: artifacts/manifest.txt"
-        echo "Total artifacts: $(find artifacts/all-artifacts -type f | wc -l) files"
+        find "$ARTIFACT_DIR" -type f | head -20
+        echo "Total files: $(find "$ARTIFACT_DIR" -type f | wc -l)"
         echo "========================================="
     
-    # Step 8: Zip and split artifacts
-    - name: Zip and split artifacts
-      run: |
-        cd artifacts
-        
-        # Create tar.gz archive
-        echo "📦 Creating archive..."
-        tar -czf all-artifacts.tar.gz all-artifacts/
-        
-        # Check size
-        FILE_SIZE=$(stat -c%s all-artifacts.tar.gz)
-        SIZE_MB=$((FILE_SIZE / 1024 / 1024))
-        
-        echo "Archive size: ${SIZE_MB}MB"
-        
-        if [ $SIZE_MB -gt 95 ]; then
-            echo "⚠️ Archive exceeds 95MB, splitting into parts..."
-            
-            # Split into 95MB parts
-            split -b 95M -d all-artifacts.tar.gz "all-artifacts.tar.gz.part"
-            rm all-artifacts.tar.gz
-            
-            # Create reassembly script using printf (avoid heredoc issues)
-            printf '#!/bin/bash\n' > reassemble.sh
-            printf 'echo "Reassembling all-artifacts.tar.gz..."\n' >> reassemble.sh
-            printf 'cat all-artifacts.tar.gz.part* > all-artifacts.tar.gz\n' >> reassemble.sh
-            printf 'echo "Extracting..."\n' >> reassemble.sh
-            printf 'tar -xzf all-artifacts.tar.gz\n' >> reassemble.sh
-            printf 'echo "✅ Done! Extracted to ./all-artifacts/"\n' >> reassemble.sh
-            printf 'echo ""\n' >> reassemble.sh
-            printf 'echo "To build the project:"\n' >> reassemble.sh
-            printf 'echo "  cd all-artifacts"\n' >> reassemble.sh
-            printf 'echo "  ./gradlew assembleDebug"\n' >> reassemble.sh
-            
-            chmod +x reassemble.sh
-            
-            echo "✅ Archive split into $(ls all-artifacts.tar.gz.part* | wc -l) parts"
-            echo "Parts are <100MB each as required"
-        else
-            echo "✅ Archive size ${SIZE_MB}MB - no splitting needed"
-        fi
-        
-        cd ..
-    
-    # Step 9: Upload artifacts
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: android-build-artifacts
-        path: |
-          artifacts/*.tar.gz*
-          artifacts/reassemble.sh
-          artifacts/manifest.txt
-          artifacts/version-info.json
-        retention-days: 30
-      if: always()
-    
-    # Step 10: Upload all-artifacts directory for direct download
-    - name: Upload all-artifacts directory
-      uses: actions/upload-artifact@v4
-      with:
-        name: all-artifacts-directory
-        path: artifacts/all-artifacts/
-        retention-days: 30
-      if: always()
-    
-    # Step 11: Commit manifest to repository
-    - name: Commit manifest to repository
+    # Step 8: Split large files and push to repository
+    - name: Split large files and push to repository
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         
-        git add artifacts/manifest.txt artifacts/version-info.json 2>/dev/null || true
+        # Function to split large files
+        split_large_files() {
+            local dir="$1"
+            local max_size_mb=95  # 95MB to be safe under 100MB limit
+            
+            find "$dir" -type f -size +${max_size_mb}M | while read file; do
+                echo "⚠️ Large file detected: $file ($(du -h "$file" | cut -f1))"
+                
+                # Split the file into 95MB parts
+                split -b 95M -d "$file" "${file}.part"
+                rm "$file"
+                
+                # Create reassembly info file
+                cat > "${file}.reassemble.txt" << REASSEMBLE_INFO
+                Original file: $(basename "$file")
+                Split into parts: $(ls ${file}.part* 2>/dev/null | wc -l)
+                To reassemble: cat ${file}.part* > $(basename "$file")
+                REASSEMBLE_INFO
+                
+                echo "  ✅ Split into $(ls ${file}.part* 2>/dev/null | wc -l) parts"
+            done
+        }
         
+        # Split large files in artifacts
+        split_large_files "$ARTIFACT_DIR"
+        
+        # Add all artifact files to git
+        git add "$ARTIFACT_DIR/"
+        
+        # Check if there are changes
         if git diff --staged --quiet && git diff --quiet; then
-          echo "ℹ️ No changes to commit"
+            echo "ℹ️ No changes to commit"
         else
-          git commit -m "Update artifact manifest [skip ci]" || true
-          git push origin HEAD:${GITHUB_REF#refs/heads/} || true
-          echo "✅ Manifest pushed to repository"
+            echo "📝 Committing artifacts to repository..."
+            git commit -m "Add build artifacts from run #${{ github.run_number }} [skip ci]"
+            
+            # Push to repository (handles large files by pushing in chunks)
+            echo "🔼 Pushing to repository (this may take a while for large files)..."
+            git push origin HEAD:${GITHUB_REF#refs/heads/}
+            echo "✅ Artifacts pushed to repository"
         fi
     
-    # Step 12: Summary
+    # Step 9: Create and push a latest symlink/info file
+    - name: Update latest build reference
+      run: |
+        # Create or update latest-build symlink info
+        echo "$ARTIFACT_DIR" > repo-artifacts/latest-build.txt
+        echo "Latest build: $ARTIFACT_DIR" >> repo-artifacts/latest-build.txt
+        echo "Build time: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> repo-artifacts/latest-build.txt
+        echo "Build type: ${{ github.event.inputs.build_type || 'debug' }}" >> repo-artifacts/latest-build.txt
+        
+        git add repo-artifacts/latest-build.txt
+        
+        git commit -m "Update latest build reference [skip ci]" || true
+        git push origin HEAD:${GITHUB_REF#refs/heads/} || true
+        
+        echo "✅ Latest build reference updated"
+    
+    # Step 10: Upload to GitHub Actions artifacts (backup)
+    - name: Upload to GitHub Actions artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: android-build-${{ github.run_number }}
+        path: ${{ env.ARTIFACT_DIR }}/
+        retention-days: 30
+      if: always()
+    
+    # Step 11: Summary
     - name: Build summary
       run: |
         echo "=========================================="
-        echo "✅ BUILD AND ARTIFACT PACKAGING COMPLETE"
+        echo "✅ BUILD AND PUSH COMPLETE"
         echo "=========================================="
         echo "Project Created: ${{ steps.create_project.outputs.project_created }}"
         echo "Build Type: ${{ github.event.inputs.build_type || 'debug' }}"
         echo ""
-        echo "📦 Artifacts available for download:"
-        echo "  - Complete archive (split into <100MB parts)"
-        echo "  - Manifest with MD5 hashes"
-        echo "  - Version info JSON"
+        echo "📁 Artifacts location in repository:"
+        echo "  $ARTIFACT_DIR"
         echo ""
-        if [ -f "artifacts/reassemble.sh" ]; then
-          echo "🔧 To reassemble locally:"
-          echo "  cd artifacts && chmod +x reassemble.sh && ./reassemble.sh"
-        fi
+        echo "📄 Latest build reference:"
+        echo "  repo-artifacts/latest-build.txt"
+        echo ""
+        echo "📦 Artifacts uploaded to GitHub Actions as well"
+        echo "=========================================="
+        
+        # Show any split files
+        echo ""
+        echo "🔍 Large files that were split:"
+        find "$ARTIFACT_DIR" -name "*.part*" | head -10 || echo "  No large files needed splitting"
         echo "=========================================="
