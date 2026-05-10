@@ -1,4 +1,4 @@
-name: Download Dependencies and Build
+name: Android Project Setup, Download Dependencies and Build
 
 on:
   push:
@@ -43,12 +43,11 @@ jobs:
         api-level: 34
         build-tools: 34.0.0
     
-    # Step 4: Set up NDK (to handle native libraries)
+    # Step 4: Set up NDK
     - name: Set up NDK
       run: |
         echo "Installing NDK..."
         sudo ${ANDROID_HOME}/tools/bin/sdkmanager --install "ndk;25.1.8937393" || true
-        echo "NDK installation completed"
     
     # Step 5: Cache Gradle dependencies
     - name: Cache Gradle packages
@@ -74,7 +73,7 @@ jobs:
         fi
         
         echo "project_created=true" >> $GITHUB_OUTPUT
-        echo "📱 Creating new Android project with Gradle 9.2.1..."
+        echo "📱 Creating new Android project..."
         
         # Create directory structure
         mkdir -p app/src/main/java/com/taak/tvhclient/ui/theme
@@ -82,7 +81,7 @@ jobs:
         mkdir -p app/src/main/res/xml
         mkdir -p gradle/wrapper
         
-        # Create gradle.properties with NDK and stripping config
+        # Create gradle.properties
         cat > gradle.properties << 'EOF'
         org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
         android.useAndroidX=true
@@ -170,7 +169,7 @@ jobs:
         }
         EOF
         
-        # Create app/build.gradle.kts with native library configuration
+        # Create app/build.gradle.kts
         cat > app/build.gradle.kts << 'EOF'
         plugins {
             alias(libs.plugins.android.application)
@@ -212,7 +211,6 @@ jobs:
                 compose = true
             }
             
-            // Packaging options to handle native libraries
             packaging {
                 jniLibs.useLegacyPackaging = true
                 resources {
@@ -437,7 +435,6 @@ jobs:
         echo '# Add project specific ProGuard rules here.' > app/proguard-rules.pro
         
         # Download gradle-wrapper.jar
-        echo "Downloading gradle-wrapper.jar for Gradle 9.2.1..."
         curl -s -L -o gradle/wrapper/gradle-wrapper.jar \
             https://raw.githubusercontent.com/gradle/gradle/v9.2.1/gradle/wrapper/gradle-wrapper.jar
         
@@ -449,60 +446,15 @@ jobs:
         
         chmod +x gradlew
         
-        echo "✅ Android project created successfully with Gradle 9.2.1!"
+        echo "✅ Android project created successfully"
     
-    # Step 7: Download Maven dependencies using Gradle wrapper
-    - name: Download Maven dependencies
+    # Step 7: Download dependencies and build
+    - name: Download dependencies and build
       run: |
-        echo "📦 Downloading Maven artifacts with Gradle 9.2.1..."
-        
-        # Make gradlew executable
         chmod +x gradlew
-        
-        # Download dependencies
         ./gradlew dependencies --no-daemon || true
         
-        # Create maven-artifacts directory
-        mkdir -p maven-artifacts
-        
-        # Copy downloaded JAR files from Gradle cache
-        if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
-            echo "Copying artifacts from Gradle cache..."
-            find ~/.gradle/caches/modules-2/files-2.1 -name "*.jar" -type f -exec cp {} maven-artifacts/ \; 2>/dev/null || true
-        fi
-        
-        # Also copy from project Gradle cache
-        if [ -d .gradle/caches/modules-2/files-2.1 ]; then
-            find .gradle/caches/modules-2/files-2.1 -name "*.jar" -type f -exec cp {} maven-artifacts/ \; 2>/dev/null || true
-        fi
-        
-        # Create README for artifacts
-        cat > maven-artifacts/README.md << EOF
-        # Downloaded Maven Artifacts
-        
-        These artifacts were downloaded from Maven repositories on $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        Using Gradle 9.2.1
-        
-        ## Dependencies included:
-        - AndroidX Core KTX
-        - AndroidX AppCompat
-        - Material Design Components
-        - Jetpack Compose
-        - And more...
-        
-        Total artifacts: $(ls -1 maven-artifacts/*.jar 2>/dev/null | wc -l) JAR files
-        EOF
-        
-        echo "✅ Downloaded $(ls -1 maven-artifacts/*.jar 2>/dev/null | wc -l) artifacts"
-    
-    # Step 8: Build the Android project
-    - name: Build Android project
-      run: |
         BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
-        
-        echo "🔨 Building Android project ($BUILD_TYPE) with Gradle 9.2.1..."
-        
-        chmod +x gradlew
         
         if [ "$BUILD_TYPE" = "release" ]; then
             ./gradlew assembleRelease --no-daemon --stacktrace
@@ -510,81 +462,246 @@ jobs:
             ./gradlew assembleDebug --no-daemon --stacktrace
         fi
         
-        echo "✅ Build completed successfully!"
+        echo "✅ Build completed!"
     
-    # Step 9: Create artifact directories
-    - name: Create artifact directories
+    # Step 8: Track, Zip, and Split Artifacts
+    - name: Track, zip and split artifacts
       run: |
-        mkdir -p artifacts/latest
-        mkdir -p artifacts/backup-$(date +'%Y%m%d-%H%M%S')
+        # Create directories
+        mkdir -p artifacts/all-artifacts
+        mkdir -p artifacts/new-artifacts
+        
+        # Track file manifest
+        MANIFEST_FILE="artifacts/manifest.txt"
+        NEW_MANIFEST_FILE="artifacts/new-manifest.txt"
+        
+        # Create timestamp
+        TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+        
+        # Function to calculate MD5 hash
+        get_md5() {
+            md5sum "$1" | cut -d' ' -f1
+        }
+        
+        # Load existing manifest if it exists
+        declare -A EXISTING_FILES
+        if [ -f "$MANIFEST_FILE" ]; then
+            echo "📋 Loading existing artifact manifest..."
+            while IFS='|' read -r hash path; do
+                EXISTING_FILES["$hash"]="$path"
+            done < "$MANIFEST_FILE"
+        fi
+        
+        # Collect all build outputs
+        echo "📦 Collecting artifacts..."
+        
+        # APK files
+        find app/build/outputs -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
+            cp "$file" artifacts/all-artifacts/ 2>/dev/null || true
+        done
+        
+        # Maven artifacts from Gradle cache with structure preserved
+        if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
+            echo "Copying Gradle cache (preserving structure)..."
+            cp -r ~/.gradle/caches/modules-2/files-2.1/* artifacts/all-artifacts/gradle-cache/ 2>/dev/null || true
+        fi
+        
+        if [ -d .gradle/caches ]; then
+            cp -r .gradle/caches/* artifacts/all-artifacts/project-gradle-cache/ 2>/dev/null || true
+        fi
+        
+        # Project files
+        cp -r app gradle build.gradle.kts settings.gradle.kts gradle.properties gradlew artifacts/all-artifacts/ 2>/dev/null || true
+        
+        # Create README
+        cat > artifacts/all-artifacts/README.md << EOF
+        # Android Build Artifacts
+        
+        Generated on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        Build Type: ${{ github.event.inputs.build_type || 'debug' }}
+        Gradle Version: 9.2.1
+        
+        ## Contents:
+        - APK/AAB files in app/build/outputs/
+        - Gradle cache with Maven artifacts
+        - Complete Android project source
+        
+        ## Usage:
+        1. Extract all parts
+        2. Run cat artifacts.tar.gz.part* > artifacts.tar.gz
+        3. tar -xzf artifacts.tar.gz
+        4. cd artifacts && ./gradlew assembleDebug
+        EOF
+        
+        # Function to zip and split large files
+        process_artifacts() {
+            local source_dir="$1"
+            local base_name="$2"
+            local max_size_mb=95  # Slightly under 100MB to be safe
+            
+            echo "📦 Processing $source_dir..."
+            
+            # Create tar archive
+            tar -czf "${base_name}.tar.gz" -C "$source_dir" .
+            
+            # Check size
+            file_size=$(stat -c%s "${base_name}.tar.gz")
+            size_mb=$((file_size / 1024 / 1024))
+            
+            if [ $size_mb -gt 95 ]; then
+                echo "⚠️ File size ${size_mb}MB exceeds 95MB, splitting into parts..."
+                
+                # Split into 95MB parts
+                split -b 95M -d "${base_name}.tar.gz" "${base_name}.tar.gz.part"
+                rm "${base_name}.tar.gz"
+                
+                # Create reassembly script
+                cat > "reassemble_${base_name}.sh" << 'REASSEMBLE'
+                #!/bin/bash
+                echo "Reassembling $1..."
+                cat $1.tar.gz.part* > $1.tar.gz
+                echo "Extracting..."
+                tar -xzf $1.tar.gz
+                echo "Done! Extracted to ./$1/"
+                REASSEMBLE
+                chmod +x "reassemble_${base_name}.sh"
+                
+                echo "✅ Split into parts: $(ls ${base_name}.tar.gz.part* | wc -l) parts"
+            else
+                echo "✅ File size ${size_mb}MB, no splitting needed"
+            fi
+        }
+        
+        # Process all artifacts
+        process_artifacts "artifacts/all-artifacts" "all-artifacts-${TIMESTAMP}"
+        
+        # Track new artifacts (compare with manifest)
+        echo "🔍 Identifying new artifacts..."
+        
+        # Create new manifest with current files
+        find artifacts/all-artifacts -type f -not -name "README.md" | while read file; do
+            hash=$(get_md5 "$file")
+            echo "$hash|$file" >> "$NEW_MANIFEST_FILE"
+        done
+        
+        # Find new files not in existing manifest
+        NEW_FILES_LIST=""
+        if [ -f "$MANIFEST_FILE" ]; then
+            while IFS='|' read -r hash path; do
+                if [ -z "${EXISTING_FILES[$hash]}" ]; then
+                    NEW_FILES_LIST="$NEW_FILES_LIST $path"
+                fi
+            done < "$NEW_MANIFEST_FILE"
+        else
+            NEW_FILES_LIST="artifacts/all-artifacts"
+        fi
+        
+        # If there are new files, create a separate archive for them
+        if [ -n "$NEW_FILES_LIST" ]; then
+            echo "🆕 Found new artifacts, creating incremental archive..."
+            
+            # Create directory for new artifacts only
+            mkdir -p artifacts/new-only
+            for file in $NEW_FILES_LIST; do
+                if [ -f "$file" ]; then
+                    rel_path="${file#artifacts/all-artifacts/}"
+                    mkdir -p "artifacts/new-only/$(dirname "$rel_path")"
+                    cp "$file" "artifacts/new-only/$rel_path"
+                fi
+            done
+            
+            # Process new artifacts
+            process_artifacts "artifacts/new-only" "new-artifacts-${TIMESTAMP}"
+            
+            # Update main manifest
+            cp "$NEW_MANIFEST_FILE" "$MANIFEST_FILE"
+            echo "✅ Updated artifact manifest"
+        else
+            echo "✅ No new artifacts detected"
+        fi
+        
+        # Create version info
+        cat > artifacts/version-info.json << EOF
+        {
+            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+            "build_type": "${{ github.event.inputs.build_type || 'debug' }}",
+            "gradle_version": "9.2.1",
+            "run_id": "${{ github.run_id }}",
+            "run_number": "${{ github.run_number }}"
+        }
+        EOF
+        
+        echo "========================================="
+        echo "📊 Artifact Summary:"
+        echo "========================================="
+        echo "All artifacts archive: all-artifacts-${TIMESTAMP}.tar.gz*"
+        echo "New artifacts archive: new-artifacts-${TIMESTAMP}.tar.gz*"
+        echo "Manifest file: artifacts/manifest.txt"
+        echo "========================================="
     
-    # Step 10: Copy all artifacts
-    - name: Copy all artifacts
-      run: |
-        # Copy APKs
-        if [ -d "app/build/outputs/apk" ]; then
-          cp -r app/build/outputs/apk/* artifacts/latest/ 2>/dev/null || true
-          echo "✅ APK files copied"
-        fi
-        
-        # Copy to backup
-        BACKUP_DIR=$(ls -d artifacts/backup-* | head -1)
-        if [ -d "app/build/outputs/apk" ]; then
-          cp -r app/build/outputs/apk/* $BACKUP_DIR/ 2>/dev/null || true
-        fi
-        
-        # Copy maven artifacts
-        if [ -d "maven-artifacts" ] && [ "$(ls -A maven-artifacts)" ]; then
-          cp -r maven-artifacts/* artifacts/latest/ 2>/dev/null || true
-          cp -r maven-artifacts/* $BACKUP_DIR/ 2>/dev/null || true
-          echo "✅ Maven artifacts copied"
-        fi
-        
-        echo "📦 All artifacts copied successfully"
+    # Step 9: Upload all archives as artifacts
+    - name: Upload all artifacts archive
+      uses: actions/upload-artifact@v4
+      with:
+        name: complete-artifacts-archive
+        path: |
+          all-artifacts-*.tar.gz*
+          reassemble_all-artifacts-*.sh
+        retention-days: 30
+      if: always()
     
-    # Step 11: Commit and push everything to repository
-    - name: Commit and push to repository
+    - name: Upload new artifacts only
+      uses: actions/upload-artifact@v4
+      with:
+        name: new-artifacts-incremental
+        path: |
+          new-artifacts-*.tar.gz*
+          reassemble_new-artifacts-*.sh
+        retention-days: 30
+      if: always()
+    
+    - name: Upload manifest and version info
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifacts-metadata
+        path: |
+          artifacts/manifest.txt
+          artifacts/version-info.json
+        retention-days: 30
+      if: always()
+    
+    # Step 10: Commit and push manifest to repository
+    - name: Commit manifest to repository
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         
-        # Add all files
-        git add -A 2>/dev/null || true
+        # Add manifest files
+        git add artifacts/manifest.txt artifacts/version-info.json 2>/dev/null || true
         
-        # Check for changes
         if git diff --staged --quiet && git diff --quiet; then
           echo "ℹ️ No changes to commit"
         else
-          echo "📝 Committing files..."
-          git commit -m "Update: Android project with Gradle 9.2.1, Maven artifacts, and build outputs [skip ci]" || true
+          git commit -m "Update artifact manifest [skip ci]" || true
           git push origin HEAD:${GITHUB_REF#refs/heads/} || true
-          echo "✅ Successfully pushed to repository"
+          echo "✅ Manifest pushed to repository"
         fi
     
-    # Step 12: Upload artifacts to GitHub Actions
-    - name: Upload latest artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: android-latest-build
-        path: artifacts/latest/
-        retention-days: 7
-      if: always()
-    
-    # Step 13: Summary
+    # Step 11: Summary
     - name: Build summary
       run: |
         echo "=========================================="
-        echo "✅ OPERATION COMPLETE"
+        echo "✅ BUILD AND ARTIFACT PACKAGING COMPLETE"
         echo "=========================================="
-        echo "Gradle Version: 9.2.1"
         echo "Project Created: ${{ steps.create_project.outputs.project_created }}"
         echo "Build Type: ${{ github.event.inputs.build_type || 'debug' }}"
         echo ""
-        echo "📦 Pushed to repository:"
-        echo "  - Android project files (Gradle 9.2.1)"
-        echo "  - Maven artifacts (dependencies)"
-        echo "  - Build outputs (APKs)"
+        echo "📦 Artifacts created:"
+        echo "  - Complete archive (split if >95MB)"
+        echo "  - Incremental new artifacts only"
+        echo "  - Tracking manifest with MD5 hashes"
         echo ""
-        echo "📁 APK location: artifacts/latest/"
-        echo "📁 Maven artifacts: maven-artifacts/"
+        echo "🔧 To reassemble locally:"
+        echo "  ./reassemble_all-artifacts-*.sh"
+        echo "  cd all-artifacts-* && ./gradlew assembleDebug"
         echo "=========================================="
