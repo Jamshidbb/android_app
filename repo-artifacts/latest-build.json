@@ -1,9 +1,10 @@
 {
-  "artifact_name": "android-build-debug-20260510-153428",
-  "zip_file": "repo-artifacts/android-build-debug-20260510-153428.zip",
-  "timestamp": "2026-05-10T15:34:31Z",
+  "artifact_name": "android-build-debug-20260510-154205",
+  "zip_file": "repo-artifacts/android-build-debug-20260510-154205.zip",
+  "timestamp": "2026-05-10T15:44:46Z",
   "build_type": "debug",
-  "run_id": "25632647775",
-  "run_number": "103",
-  "split_required": false
+  "run_id": "25632773081",
+  "run_number": "104",
+  "split_required": true,
+  "maven_cache_archive": "maven-cache-25632773081.tar.gz"
 }
