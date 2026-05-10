@@ -1,4 +1,4 @@
-name: Android Project Setup, Download Dependencies and Build
+name: Download Dependencies and Build
 
 on:
   push:
@@ -43,13 +43,7 @@ jobs:
         api-level: 34
         build-tools: 34.0.0
     
-    # Step 4: Set up NDK
-    - name: Set up NDK
-      run: |
-        echo "Installing NDK..."
-        sudo ${ANDROID_HOME}/tools/bin/sdkmanager --install "ndk;25.1.8937393" || true
-    
-    # Step 5: Cache Gradle dependencies
+    # Step 4: Cache Gradle dependencies
     - name: Cache Gradle packages
       uses: actions/cache@v4
       with:
@@ -61,7 +55,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-gradle-
     
-    # Step 6: Create Android project if it doesn't exist
+    # Step 5: Create Android project if it doesn't exist
     - name: Create Android project (if needed)
       id: create_project
       run: |
@@ -73,7 +67,7 @@ jobs:
         fi
         
         echo "project_created=true" >> $GITHUB_OUTPUT
-        echo "📱 Creating new Android project..."
+        echo "📱 Creating new Android project with Gradle 9.2.1..."
         
         # Create directory structure
         mkdir -p app/src/main/java/com/taak/tvhclient/ui/theme
@@ -448,13 +442,18 @@ jobs:
         
         echo "✅ Android project created successfully"
     
-    # Step 7: Download dependencies and build
+    # Step 6: Download dependencies and build
     - name: Download dependencies and build
       run: |
         chmod +x gradlew
+        
+        # Download dependencies first
+        echo "📦 Downloading dependencies..."
         ./gradlew dependencies --no-daemon || true
         
         BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
+        
+        echo "🔨 Building Android project ($BUILD_TYPE)..."
         
         if [ "$BUILD_TYPE" = "release" ]; then
             ./gradlew assembleRelease --no-daemon --stacktrace
@@ -464,161 +463,32 @@ jobs:
         
         echo "✅ Build completed!"
     
-    # Step 8: Track, Zip, and Split Artifacts
-    - name: Track, zip and split artifacts
+    # Step 7: Create artifact directories and track files
+    - name: Create and track artifacts
       run: |
-        # Create directories
         mkdir -p artifacts/all-artifacts
         mkdir -p artifacts/new-artifacts
         
-        # Track file manifest
-        MANIFEST_FILE="artifacts/manifest.txt"
-        NEW_MANIFEST_FILE="artifacts/new-manifest.txt"
-        
-        # Create timestamp
         TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
         
-        # Function to calculate MD5 hash
-        get_md5() {
-            md5sum "$1" | cut -d' ' -f1
-        }
-        
-        # Load existing manifest if it exists
-        declare -A EXISTING_FILES
-        if [ -f "$MANIFEST_FILE" ]; then
-            echo "📋 Loading existing artifact manifest..."
-            while IFS='|' read -r hash path; do
-                EXISTING_FILES["$hash"]="$path"
-            done < "$MANIFEST_FILE"
+        # Copy APKs
+        if [ -d "app/build/outputs/apk" ]; then
+            cp -r app/build/outputs/apk/* artifacts/all-artifacts/ 2>/dev/null || true
+            echo "✅ APK files copied"
         fi
         
-        # Collect all build outputs
-        echo "📦 Collecting artifacts..."
-        
-        # APK files
-        find app/build/outputs -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
-            cp "$file" artifacts/all-artifacts/ 2>/dev/null || true
-        done
-        
-        # Maven artifacts from Gradle cache with structure preserved
+        # Copy Gradle cache (preserving structure)
         if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
-            echo "Copying Gradle cache (preserving structure)..."
+            mkdir -p artifacts/all-artifacts/gradle-cache
             cp -r ~/.gradle/caches/modules-2/files-2.1/* artifacts/all-artifacts/gradle-cache/ 2>/dev/null || true
+            echo "✅ Gradle cache copied"
         fi
         
-        if [ -d .gradle/caches ]; then
-            cp -r .gradle/caches/* artifacts/all-artifacts/project-gradle-cache/ 2>/dev/null || true
-        fi
-        
-        # Project files
+        # Copy project files
         cp -r app gradle build.gradle.kts settings.gradle.kts gradle.properties gradlew artifacts/all-artifacts/ 2>/dev/null || true
         
-        # Create README
-        cat > artifacts/all-artifacts/README.md << EOF
-        # Android Build Artifacts
-        
-        Generated on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        Build Type: ${{ github.event.inputs.build_type || 'debug' }}
-        Gradle Version: 9.2.1
-        
-        ## Contents:
-        - APK/AAB files in app/build/outputs/
-        - Gradle cache with Maven artifacts
-        - Complete Android project source
-        
-        ## Usage:
-        1. Extract all parts
-        2. Run cat artifacts.tar.gz.part* > artifacts.tar.gz
-        3. tar -xzf artifacts.tar.gz
-        4. cd artifacts && ./gradlew assembleDebug
-        EOF
-        
-        # Function to zip and split large files
-        process_artifacts() {
-            local source_dir="$1"
-            local base_name="$2"
-            local max_size_mb=95  # Slightly under 100MB to be safe
-            
-            echo "📦 Processing $source_dir..."
-            
-            # Create tar archive
-            tar -czf "${base_name}.tar.gz" -C "$source_dir" .
-            
-            # Check size
-            file_size=$(stat -c%s "${base_name}.tar.gz")
-            size_mb=$((file_size / 1024 / 1024))
-            
-            if [ $size_mb -gt 95 ]; then
-                echo "⚠️ File size ${size_mb}MB exceeds 95MB, splitting into parts..."
-                
-                # Split into 95MB parts
-                split -b 95M -d "${base_name}.tar.gz" "${base_name}.tar.gz.part"
-                rm "${base_name}.tar.gz"
-                
-                # Create reassembly script
-                cat > "reassemble_${base_name}.sh" << 'REASSEMBLE'
-                #!/bin/bash
-                echo "Reassembling $1..."
-                cat $1.tar.gz.part* > $1.tar.gz
-                echo "Extracting..."
-                tar -xzf $1.tar.gz
-                echo "Done! Extracted to ./$1/"
-                REASSEMBLE
-                chmod +x "reassemble_${base_name}.sh"
-                
-                echo "✅ Split into parts: $(ls ${base_name}.tar.gz.part* | wc -l) parts"
-            else
-                echo "✅ File size ${size_mb}MB, no splitting needed"
-            fi
-        }
-        
-        # Process all artifacts
-        process_artifacts "artifacts/all-artifacts" "all-artifacts-${TIMESTAMP}"
-        
-        # Track new artifacts (compare with manifest)
-        echo "🔍 Identifying new artifacts..."
-        
-        # Create new manifest with current files
-        find artifacts/all-artifacts -type f -not -name "README.md" | while read file; do
-            hash=$(get_md5 "$file")
-            echo "$hash|$file" >> "$NEW_MANIFEST_FILE"
-        done
-        
-        # Find new files not in existing manifest
-        NEW_FILES_LIST=""
-        if [ -f "$MANIFEST_FILE" ]; then
-            while IFS='|' read -r hash path; do
-                if [ -z "${EXISTING_FILES[$hash]}" ]; then
-                    NEW_FILES_LIST="$NEW_FILES_LIST $path"
-                fi
-            done < "$NEW_MANIFEST_FILE"
-        else
-            NEW_FILES_LIST="artifacts/all-artifacts"
-        fi
-        
-        # If there are new files, create a separate archive for them
-        if [ -n "$NEW_FILES_LIST" ]; then
-            echo "🆕 Found new artifacts, creating incremental archive..."
-            
-            # Create directory for new artifacts only
-            mkdir -p artifacts/new-only
-            for file in $NEW_FILES_LIST; do
-                if [ -f "$file" ]; then
-                    rel_path="${file#artifacts/all-artifacts/}"
-                    mkdir -p "artifacts/new-only/$(dirname "$rel_path")"
-                    cp "$file" "artifacts/new-only/$rel_path"
-                fi
-            done
-            
-            # Process new artifacts
-            process_artifacts "artifacts/new-only" "new-artifacts-${TIMESTAMP}"
-            
-            # Update main manifest
-            cp "$NEW_MANIFEST_FILE" "$MANIFEST_FILE"
-            echo "✅ Updated artifact manifest"
-        else
-            echo "✅ No new artifacts detected"
-        fi
+        # Create manifest of artifacts
+        find artifacts/all-artifacts -type f -exec md5sum {} \; > artifacts/manifest.txt
         
         # Create version info
         cat > artifacts/version-info.json << EOF
@@ -631,52 +501,104 @@ jobs:
         }
         EOF
         
+        # Create README
+        cat > artifacts/all-artifacts/README.md << EOF
+        # Android Build Artifacts
+        
+        Generated on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        Build Type: ${{ github.event.inputs.build_type || 'debug' }}
+        
+        ## Contents:
+        - APK files in app/build/outputs/
+        - Gradle cache with all Maven dependencies
+        - Complete Android project source
+        
+        ## To use locally:
+        1. Extract all files
+        2. Run: ./gradlew assembleDebug
+        EOF
+        
         echo "========================================="
         echo "📊 Artifact Summary:"
         echo "========================================="
-        echo "All artifacts archive: all-artifacts-${TIMESTAMP}.tar.gz*"
-        echo "New artifacts archive: new-artifacts-${TIMESTAMP}.tar.gz*"
-        echo "Manifest file: artifacts/manifest.txt"
+        echo "Artifacts directory: artifacts/all-artifacts/"
+        echo "Manifest: artifacts/manifest.txt"
+        echo "Total artifacts: $(find artifacts/all-artifacts -type f | wc -l) files"
         echo "========================================="
     
-    # Step 9: Upload all archives as artifacts
-    - name: Upload all artifacts archive
-      uses: actions/upload-artifact@v4
-      with:
-        name: complete-artifacts-archive
-        path: |
-          all-artifacts-*.tar.gz*
-          reassemble_all-artifacts-*.sh
-        retention-days: 30
-      if: always()
+    # Step 8: Zip and split artifacts if needed
+    - name: Zip and split artifacts
+      run: |
+        cd artifacts
+        
+        # Create tar.gz archive
+        echo "📦 Creating archive..."
+        tar -czf all-artifacts.tar.gz all-artifacts/
+        
+        # Check size
+        FILE_SIZE=$(stat -c%s all-artifacts.tar.gz)
+        SIZE_MB=$((FILE_SIZE / 1024 / 1024))
+        
+        echo "Archive size: ${SIZE_MB}MB"
+        
+        if [ $SIZE_MB -gt 95 ]; then
+            echo "⚠️ Archive exceeds 95MB, splitting into parts..."
+            
+            # Split into 95MB parts
+            split -b 95M -d all-artifacts.tar.gz "all-artifacts.tar.gz.part"
+            rm all-artifacts.tar.gz
+            
+            # Create reassembly script
+            cat > reassemble.sh << 'REASSEMBLE'
+            #!/bin/bash
+            echo "Reassembling all-artifacts.tar.gz..."
+            cat all-artifacts.tar.gz.part* > all-artifacts.tar.gz
+            echo "Extracting..."
+            tar -xzf all-artifacts.tar.gz
+            echo "✅ Done! Extracted to ./all-artifacts/"
+            echo ""
+            echo "To build the project:"
+            echo "  cd all-artifacts"
+            echo "  ./gradlew assembleDebug"
+            REASSEMBLE
+            chmod +x reassemble.sh
+            
+            echo "✅ Archive split into $(ls all-artifacts.tar.gz.part* | wc -l) parts"
+            echo "Parts are <100MB each as required"
+        else
+            echo "✅ Archive size ${SIZE_MB}MB - no splitting needed"
+        fi
+        
+        cd ..
     
-    - name: Upload new artifacts only
+    # Step 9: Upload artifacts
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: new-artifacts-incremental
+        name: android-build-artifacts
         path: |
-          new-artifacts-*.tar.gz*
-          reassemble_new-artifacts-*.sh
-        retention-days: 30
-      if: always()
-    
-    - name: Upload manifest and version info
-      uses: actions/upload-artifact@v4
-      with:
-        name: artifacts-metadata
-        path: |
+          artifacts/*.tar.gz*
+          artifacts/reassemble.sh
           artifacts/manifest.txt
           artifacts/version-info.json
         retention-days: 30
       if: always()
     
-    # Step 10: Commit and push manifest to repository
+    # Step 10: Upload all-artifacts directory for direct download
+    - name: Upload all-artifacts directory
+      uses: actions/upload-artifact@v4
+      with:
+        name: all-artifacts-directory
+        path: artifacts/all-artifacts/
+        retention-days: 30
+      if: always()
+    
+    # Step 11: Commit manifest to repository
     - name: Commit manifest to repository
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         
-        # Add manifest files
         git add artifacts/manifest.txt artifacts/version-info.json 2>/dev/null || true
         
         if git diff --staged --quiet && git diff --quiet; then
@@ -687,7 +609,7 @@ jobs:
           echo "✅ Manifest pushed to repository"
         fi
     
-    # Step 11: Summary
+    # Step 12: Summary
     - name: Build summary
       run: |
         echo "=========================================="
@@ -696,12 +618,13 @@ jobs:
         echo "Project Created: ${{ steps.create_project.outputs.project_created }}"
         echo "Build Type: ${{ github.event.inputs.build_type || 'debug' }}"
         echo ""
-        echo "📦 Artifacts created:"
+        echo "📦 Artifacts available for download:"
         echo "  - Complete archive (split if >95MB)"
-        echo "  - Incremental new artifacts only"
-        echo "  - Tracking manifest with MD5 hashes"
+        echo "  - Manifest with MD5 hashes"
+        echo "  - Version info JSON"
         echo ""
-        echo "🔧 To reassemble locally:"
-        echo "  ./reassemble_all-artifacts-*.sh"
-        echo "  cd all-artifacts-* && ./gradlew assembleDebug"
+        if [ -f "artifacts/reassemble.sh" ]; then
+          echo "🔧 To reassemble locally:"
+          echo "  chmod +x reassemble.sh && ./reassemble.sh"
+        fi
         echo "=========================================="
