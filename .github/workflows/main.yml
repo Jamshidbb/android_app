@@ -40,10 +40,17 @@ jobs:
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
       with:
-        api-level: 36
-        build-tools: 36.0.0
+        api-level: 34
+        build-tools: 34.0.0
     
-    # Step 4: Cache Gradle dependencies
+    # Step 4: Set up NDK (to handle native libraries)
+    - name: Set up NDK
+      run: |
+        echo "Installing NDK..."
+        sudo ${ANDROID_HOME}/tools/bin/sdkmanager --install "ndk;25.1.8937393" || true
+        echo "NDK installation completed"
+    
+    # Step 5: Cache Gradle dependencies
     - name: Cache Gradle packages
       uses: actions/cache@v4
       with:
@@ -55,7 +62,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-gradle-
     
-    # Step 5: Create Android project if it doesn't exist
+    # Step 6: Create Android project if it doesn't exist
     - name: Create Android project (if needed)
       id: create_project
       run: |
@@ -67,7 +74,7 @@ jobs:
         fi
         
         echo "project_created=true" >> $GITHUB_OUTPUT
-        echo "📱 Creating new Android project..."
+        echo "📱 Creating new Android project with Gradle 9.2.1..."
         
         # Create directory structure
         mkdir -p app/src/main/java/com/taak/tvhclient/ui/theme
@@ -75,12 +82,15 @@ jobs:
         mkdir -p app/src/main/res/xml
         mkdir -p gradle/wrapper
         
-        # Create gradle.properties
+        # Create gradle.properties with NDK and stripping config
         cat > gradle.properties << 'EOF'
         org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
         android.useAndroidX=true
         android.enableJetifier=true
         kotlin.code.style=official
+        android.bundle.enableUncompressedNativeLibs=false
+        android.nativeLib.strip=false
+        android.nativeLib.ignoreStripErrors=true
         EOF
         
         # Create settings.gradle.kts
@@ -103,7 +113,7 @@ jobs:
         include(":app")
         EOF
         
-        # Create gradle-wrapper.properties
+        # Create gradle-wrapper.properties with Gradle 9.2.1
         cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
         distributionBase=GRADLE_USER_HOME
         distributionPath=wrapper/dists
@@ -119,12 +129,12 @@ jobs:
         mkdir -p gradle
         cat > gradle/libs.versions.toml << 'EOF'
         [versions]
-        agp = "8.8.0"
-        kotlin = "2.0.20"
-        coreKtx = "1.15.0"
-        lifecycleRuntimeKtx = "2.8.7"
-        activityCompose = "1.10.0"
-        composeBom = "2024.12.01"
+        agp = "8.5.2"
+        kotlin = "1.9.22"
+        coreKtx = "1.13.1"
+        lifecycleRuntimeKtx = "2.8.4"
+        activityCompose = "1.9.0"
+        composeBom = "2024.09.00"
         junit = "4.13.2"
         junitVersion = "1.2.1"
         espressoCore = "3.6.1"
@@ -147,6 +157,7 @@ jobs:
         
         [plugins]
         android-application = { id = "com.android.application", version.ref = "agp" }
+        kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
         kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
         EOF
         
@@ -154,25 +165,27 @@ jobs:
         cat > build.gradle.kts << 'EOF'
         plugins {
             alias(libs.plugins.android.application) apply false
+            alias(libs.plugins.kotlin.android) apply false
             alias(libs.plugins.kotlin.compose) apply false
         }
         EOF
         
-        # Create app/build.gradle.kts
+        # Create app/build.gradle.kts with native library configuration
         cat > app/build.gradle.kts << 'EOF'
         plugins {
             alias(libs.plugins.android.application)
+            alias(libs.plugins.kotlin.android)
             alias(libs.plugins.kotlin.compose)
         }
         
         android {
             namespace = "com.taak.tvhclient"
-            compileSdk = 36
+            compileSdk = 34
         
             defaultConfig {
                 applicationId = "com.taak.tvhclient"
                 minSdk = 24
-                targetSdk = 36
+                targetSdk = 34
                 versionCode = 1
                 versionName = "1.0"
         
@@ -192,8 +205,19 @@ jobs:
                 sourceCompatibility = JavaVersion.VERSION_11
                 targetCompatibility = JavaVersion.VERSION_11
             }
+            kotlinOptions {
+                jvmTarget = "11"
+            }
             buildFeatures {
                 compose = true
+            }
+            
+            // Packaging options to handle native libraries
+            packaging {
+                jniLibs.useLegacyPackaging = true
+                resources {
+                    excludes += "/META-INF/{AL2.0,LGPL2.1}"
+                }
             }
         }
         
@@ -362,9 +386,11 @@ jobs:
         EOF
         
         # Create resource files
-        echo '<resources>' > app/src/main/res/values/strings.xml
-        echo '    <string name="app_name">TVH Client</string>' >> app/src/main/res/values/strings.xml
-        echo '</resources>' >> app/src/main/res/values/strings.xml
+        cat > app/src/main/res/values/strings.xml << 'EOF'
+        <resources>
+            <string name="app_name">TVH Client</string>
+        </resources>
+        EOF
         
         cat > app/src/main/res/values/themes.xml << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
@@ -411,43 +437,43 @@ jobs:
         echo '# Add project specific ProGuard rules here.' > app/proguard-rules.pro
         
         # Download gradle-wrapper.jar
+        echo "Downloading gradle-wrapper.jar for Gradle 9.2.1..."
         curl -s -L -o gradle/wrapper/gradle-wrapper.jar \
             https://raw.githubusercontent.com/gradle/gradle/v9.2.1/gradle/wrapper/gradle-wrapper.jar
         
         # Create gradlew script
-        echo '#!/bin/sh' > gradlew
-        echo 'exec "$JAVA_HOME/bin/java" -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"' >> gradlew
+        cat > gradlew << 'EOF'
+        #!/bin/sh
+        exec "$JAVA_HOME/bin/java" -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+        EOF
+        
         chmod +x gradlew
         
-        echo "✅ Android project created successfully!"
+        echo "✅ Android project created successfully with Gradle 9.2.1!"
     
-    # Step 6: Download Maven dependencies using Gradle wrapper
+    # Step 7: Download Maven dependencies using Gradle wrapper
     - name: Download Maven dependencies
       run: |
-        echo "📦 Downloading Maven artifacts..."
+        echo "📦 Downloading Maven artifacts with Gradle 9.2.1..."
         
         # Make gradlew executable
         chmod +x gradlew
         
-        # Run gradle to download dependencies
+        # Download dependencies
         ./gradlew dependencies --no-daemon || true
         
-        # Copy Gradle cache to maven-artifacts directory
+        # Create maven-artifacts directory
         mkdir -p maven-artifacts
         
         # Copy downloaded JAR files from Gradle cache
         if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
             echo "Copying artifacts from Gradle cache..."
-            find ~/.gradle/caches/modules-2/files-2.1 -name "*.jar" -type f | head -100 | while read jar; do
-                cp "$jar" maven-artifacts/ 2>/dev/null || true
-            done
+            find ~/.gradle/caches/modules-2/files-2.1 -name "*.jar" -type f -exec cp {} maven-artifacts/ \; 2>/dev/null || true
         fi
         
         # Also copy from project Gradle cache
         if [ -d .gradle/caches/modules-2/files-2.1 ]; then
-            find .gradle/caches/modules-2/files-2.1 -name "*.jar" -type f | head -100 | while read jar; do
-                cp "$jar" maven-artifacts/ 2>/dev/null || true
-            done
+            find .gradle/caches/modules-2/files-2.1 -name "*.jar" -type f -exec cp {} maven-artifacts/ \; 2>/dev/null || true
         fi
         
         # Create README for artifacts
@@ -455,6 +481,7 @@ jobs:
         # Downloaded Maven Artifacts
         
         These artifacts were downloaded from Maven repositories on $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        Using Gradle 9.2.1
         
         ## Dependencies included:
         - AndroidX Core KTX
@@ -468,12 +495,12 @@ jobs:
         
         echo "✅ Downloaded $(ls -1 maven-artifacts/*.jar 2>/dev/null | wc -l) artifacts"
     
-    # Step 7: Build the Android project
+    # Step 8: Build the Android project
     - name: Build Android project
       run: |
         BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
         
-        echo "🔨 Building Android project ($BUILD_TYPE)..."
+        echo "🔨 Building Android project ($BUILD_TYPE) with Gradle 9.2.1..."
         
         chmod +x gradlew
         
@@ -483,15 +510,15 @@ jobs:
             ./gradlew assembleDebug --no-daemon --stacktrace
         fi
         
-        echo "✅ Build completed!"
+        echo "✅ Build completed successfully!"
     
-    # Step 8: Create artifact directories
+    # Step 9: Create artifact directories
     - name: Create artifact directories
       run: |
         mkdir -p artifacts/latest
         mkdir -p artifacts/backup-$(date +'%Y%m%d-%H%M%S')
     
-    # Step 9: Copy all artifacts
+    # Step 10: Copy all artifacts
     - name: Copy all artifacts
       run: |
         # Copy APKs
@@ -515,7 +542,7 @@ jobs:
         
         echo "📦 All artifacts copied successfully"
     
-    # Step 10: Commit and push everything to repository
+    # Step 11: Commit and push everything to repository
     - name: Commit and push to repository
       run: |
         git config user.name "github-actions[bot]"
@@ -529,12 +556,12 @@ jobs:
           echo "ℹ️ No changes to commit"
         else
           echo "📝 Committing files..."
-          git commit -m "Update: Android project, Maven artifacts, and build outputs [skip ci]" || true
+          git commit -m "Update: Android project with Gradle 9.2.1, Maven artifacts, and build outputs [skip ci]" || true
           git push origin HEAD:${GITHUB_REF#refs/heads/} || true
           echo "✅ Successfully pushed to repository"
         fi
     
-    # Step 11: Upload artifacts to GitHub Actions
+    # Step 12: Upload artifacts to GitHub Actions
     - name: Upload latest artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -543,19 +570,21 @@ jobs:
         retention-days: 7
       if: always()
     
-    # Step 12: Summary
+    # Step 13: Summary
     - name: Build summary
       run: |
         echo "=========================================="
         echo "✅ OPERATION COMPLETE"
         echo "=========================================="
+        echo "Gradle Version: 9.2.1"
         echo "Project Created: ${{ steps.create_project.outputs.project_created }}"
         echo "Build Type: ${{ github.event.inputs.build_type || 'debug' }}"
         echo ""
         echo "📦 Pushed to repository:"
-        echo "  - Android project files"
-        echo "  - Maven artifacts"
+        echo "  - Android project files (Gradle 9.2.1)"
+        echo "  - Maven artifacts (dependencies)"
         echo "  - Build outputs (APKs)"
         echo ""
         echo "📁 APK location: artifacts/latest/"
+        echo "📁 Maven artifacts: maven-artifacts/"
         echo "=========================================="
