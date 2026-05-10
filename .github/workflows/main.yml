@@ -20,13 +20,14 @@ jobs:
   create-and-build-android-app:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      actions: write
+      contents: write  # Required for pushing to repository
     
     steps:
     # Step 1: Checkout the repository
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
     
     # Step 2: Set up JDK 17
     - name: Set up JDK 17
@@ -56,13 +57,16 @@ jobs:
     
     # Step 5: Create Android project if it doesn't exist
     - name: Create Android project
+      id: create_project
       run: |
         # Check if project already exists
         if [ -f "app/build.gradle.kts" ] || [ -f "app/build.gradle" ]; then
             echo "✅ Android project already exists. Skipping creation."
+            echo "project_created=false" >> $GITHUB_OUTPUT
             exit 0
         fi
         
+        echo "project_created=true" >> $GITHUB_OUTPUT
         echo "📱 Creating new Android project with latest template (Gradle 9.2.1 + Compose)..."
         
         # Create directory structure
@@ -448,10 +452,6 @@ jobs:
         fi
         
         echo "✅ Build completed successfully!"
-        
-        # Display build outputs
-        echo "📁 Build outputs:"
-        find app/build/outputs -name "*.apk" -o -name "*.aab" 2>/dev/null || echo "No outputs found"
     
     # Step 7: Create artifact directories
     - name: Create artifact directories
@@ -482,9 +482,29 @@ jobs:
         done
         
         echo "📦 Artifacts copied successfully"
-        ls -la artifacts/latest/ || echo "No files"
     
-    # Step 9: Upload latest artifacts
+    # Step 9: Commit and push Android project to repository
+    - name: Commit and push Android project
+      if: steps.create_project.outputs.project_created == 'true'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # Add all Android project files
+        git add app/ gradle/ build.gradle.kts settings.gradle.kts gradle.properties gradlew gradlew.bat 2>/dev/null || true
+        
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+        
+        COMMIT_MSG="Add Android project with Gradle 9.2.1 and Compose [skip ci]"
+        git commit -m "$COMMIT_MSG"
+        git push origin HEAD:${GITHUB_REF#refs/heads/} --force-with-lease
+        
+        echo "✅ Successfully pushed Android project to repository"
+    
+    # Step 10: Upload latest artifacts as workflow artifacts
     - name: Upload latest artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -493,7 +513,7 @@ jobs:
         retention-days: 7
       if: always()
     
-    # Step 10: Upload backup artifacts
+    # Step 11: Upload backup artifacts
     - name: Upload backup artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -501,3 +521,23 @@ jobs:
         path: artifacts/backup-*/
         retention-days: 30
       if: always()
+    
+    # Step 12: Summary
+    - name: Build summary
+      run: |
+        echo "=========================================="
+        echo "✅ ANDROID BUILD COMPLETE"
+        echo "=========================================="
+        echo "Build Type: ${{ github.event.inputs.build_type || 'debug' }}"
+        echo "Project Created: ${{ steps.create_project.outputs.project_created }}"
+        echo ""
+        echo "📱 APK Location:"
+        find artifacts -name "*.apk" 2>/dev/null || echo "  No APK files found"
+        echo ""
+        echo "📁 Repository Status:"
+        if [ "${{ steps.create_project.outputs.project_created }}" = "true" ]; then
+          echo "  ✓ Android project files pushed to repository"
+        else
+          echo "  ℹ Project already existed, using existing files"
+        fi
+        echo "=========================================="
