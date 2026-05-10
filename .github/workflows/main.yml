@@ -1,4 +1,4 @@
-name: Download Dependencies and Build
+name: Android Project Setup, Download Dependencies and Build
 
 on:
   push:
@@ -467,7 +467,6 @@ jobs:
     - name: Create and track artifacts
       run: |
         mkdir -p artifacts/all-artifacts
-        mkdir -p artifacts/new-artifacts
         
         TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
         
@@ -491,22 +490,13 @@ jobs:
         find artifacts/all-artifacts -type f -exec md5sum {} \; > artifacts/manifest.txt
         
         # Create version info
-        cat > artifacts/version-info.json << EOF
-        {
-            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-            "build_type": "${{ github.event.inputs.build_type || 'debug' }}",
-            "gradle_version": "9.2.1",
-            "run_id": "${{ github.run_id }}",
-            "run_number": "${{ github.run_number }}"
-        }
-        EOF
+        echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"build_type\":\"${{ github.event.inputs.build_type || 'debug' }}\",\"gradle_version\":\"9.2.1\",\"run_id\":\"${{ github.run_id }}\",\"run_number\":\"${{ github.run_number }}\"}" > artifacts/version-info.json
         
         # Create README
-        cat > artifacts/all-artifacts/README.md << EOF
+        cat > artifacts/all-artifacts/README.md << 'README_EOF'
         # Android Build Artifacts
         
         Generated on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        Build Type: ${{ github.event.inputs.build_type || 'debug' }}
         
         ## Contents:
         - APK files in app/build/outputs/
@@ -516,7 +506,7 @@ jobs:
         ## To use locally:
         1. Extract all files
         2. Run: ./gradlew assembleDebug
-        EOF
+        README_EOF
         
         echo "========================================="
         echo "📊 Artifact Summary:"
@@ -526,7 +516,7 @@ jobs:
         echo "Total artifacts: $(find artifacts/all-artifacts -type f | wc -l) files"
         echo "========================================="
     
-    # Step 8: Zip and split artifacts if needed
+    # Step 8: Zip and split artifacts
     - name: Zip and split artifacts
       run: |
         cd artifacts
@@ -548,19 +538,18 @@ jobs:
             split -b 95M -d all-artifacts.tar.gz "all-artifacts.tar.gz.part"
             rm all-artifacts.tar.gz
             
-            # Create reassembly script
-            cat > reassemble.sh << 'REASSEMBLE'
-            #!/bin/bash
-            echo "Reassembling all-artifacts.tar.gz..."
-            cat all-artifacts.tar.gz.part* > all-artifacts.tar.gz
-            echo "Extracting..."
-            tar -xzf all-artifacts.tar.gz
-            echo "✅ Done! Extracted to ./all-artifacts/"
-            echo ""
-            echo "To build the project:"
-            echo "  cd all-artifacts"
-            echo "  ./gradlew assembleDebug"
-            REASSEMBLE
+            # Create reassembly script using printf (avoid heredoc issues)
+            printf '#!/bin/bash\n' > reassemble.sh
+            printf 'echo "Reassembling all-artifacts.tar.gz..."\n' >> reassemble.sh
+            printf 'cat all-artifacts.tar.gz.part* > all-artifacts.tar.gz\n' >> reassemble.sh
+            printf 'echo "Extracting..."\n' >> reassemble.sh
+            printf 'tar -xzf all-artifacts.tar.gz\n' >> reassemble.sh
+            printf 'echo "✅ Done! Extracted to ./all-artifacts/"\n' >> reassemble.sh
+            printf 'echo ""\n' >> reassemble.sh
+            printf 'echo "To build the project:"\n' >> reassemble.sh
+            printf 'echo "  cd all-artifacts"\n' >> reassemble.sh
+            printf 'echo "  ./gradlew assembleDebug"\n' >> reassemble.sh
+            
             chmod +x reassemble.sh
             
             echo "✅ Archive split into $(ls all-artifacts.tar.gz.part* | wc -l) parts"
@@ -619,12 +608,12 @@ jobs:
         echo "Build Type: ${{ github.event.inputs.build_type || 'debug' }}"
         echo ""
         echo "📦 Artifacts available for download:"
-        echo "  - Complete archive (split if >95MB)"
+        echo "  - Complete archive (split into <100MB parts)"
         echo "  - Manifest with MD5 hashes"
         echo "  - Version info JSON"
         echo ""
         if [ -f "artifacts/reassemble.sh" ]; then
           echo "🔧 To reassemble locally:"
-          echo "  chmod +x reassemble.sh && ./reassemble.sh"
+          echo "  cd artifacts && chmod +x reassemble.sh && ./reassemble.sh"
         fi
         echo "=========================================="
