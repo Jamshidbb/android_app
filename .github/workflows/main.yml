@@ -19,13 +19,16 @@ on:
 jobs:
   create-and-build-android-app:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
     
     steps:
     # Step 1: Checkout the repository
     - name: Checkout repository
       uses: actions/checkout@v4
     
-    # Step 2: Set up JDK 17 (Gradle 9.2.1 requires JDK 17 or higher)
+    # Step 2: Set up JDK 17
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
@@ -99,7 +102,6 @@ jobs:
         
         # Create gradle-wrapper.properties with Gradle 9.2.1
         cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
-        #Fri May 08 08:41:48 IRST 2026
         distributionBase=GRADLE_USER_HOME
         distributionPath=wrapper/dists
         distributionSha256Sum=72f44c9f8ebcb1af43838f45ee5c4aa9c5444898b3468ab3f4af7b6076c5bc3f
@@ -147,7 +149,6 @@ jobs:
         
         # Create root build.gradle.kts
         cat > build.gradle.kts << 'EOF'
-        // Top-level build file where you can add configuration options common to all sub-projects/modules.
         plugins {
             alias(libs.plugins.android.application) apply false
             alias(libs.plugins.kotlin.compose) apply false
@@ -366,18 +367,13 @@ jobs:
         </resources>
         EOF
         
-        # Create themes.xml for the app (required for Android manifest)
+        # Create themes.xml for the app
         cat > app/src/main/res/values/themes.xml << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
         <resources>
             <style name="Theme.TVHClient" parent="android:Theme.Material.Light.NoActionBar">
                 <item name="android:statusBarColor">@color/purple_700</item>
                 <item name="android:windowBackground">@color/white</item>
-            </style>
-            
-            <style name="Theme.TVHClient.Dark" parent="android:Theme.Material.NoActionBar">
-                <item name="android:statusBarColor">@color/black</item>
-                <item name="android:windowBackground">@color/black</item>
             </style>
             
             <color name="purple_200">#FFBB86FC</color>
@@ -390,7 +386,7 @@ jobs:
         </resources>
         EOF
         
-        # Create AndroidManifest.xml with proper theme
+        # Create AndroidManifest.xml
         cat > app/src/main/AndroidManifest.xml << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -418,8 +414,6 @@ jobs:
         # Create proguard-rules.pro
         cat > app/proguard-rules.pro << 'EOF'
         # Add project specific ProGuard rules here.
-        # You can control the set of applied configuration files using the
-        # proguardFiles setting in build.gradle.
         EOF
         
         # Download gradle-wrapper.jar
@@ -435,9 +429,7 @@ jobs:
         
         chmod +x gradlew
         
-        echo "✅ Android project created successfully with Gradle 9.2.1 and Compose!"
-        echo "📁 Project structure:"
-        ls -la
+        echo "✅ Android project created successfully!"
     
     # Step 6: Build the Android project
     - name: Build Android project
@@ -446,46 +438,20 @@ jobs:
         
         echo "🔨 Building Android project ($BUILD_TYPE)..."
         
-        # Check if gradlew exists
-        if [ ! -f "gradlew" ]; then
-            echo "❌ gradlew not found!"
-            exit 1
-        fi
-        
-        # Make gradlew executable
         chmod +x gradlew
-        
-        # Clean previous builds
-        echo "🧹 Cleaning previous builds..."
         ./gradlew clean --no-daemon || true
         
-        # Build the project
-        echo "📦 Building APK ($BUILD_TYPE)..."
         if [ "$BUILD_TYPE" = "release" ]; then
             ./gradlew assembleRelease --no-daemon --stacktrace
         else
             ./gradlew assembleDebug --no-daemon --stacktrace
         fi
         
-        # Build AAB for release
-        if [ "$BUILD_TYPE" = "release" ]; then
-            echo "📦 Building AAB ($BUILD_TYPE)..."
-            ./gradlew bundleRelease --no-daemon --stacktrace || true
-        fi
-        
         echo "✅ Build completed successfully!"
         
         # Display build outputs
         echo "📁 Build outputs:"
-        if [ -d "app/build/outputs/apk" ]; then
-            echo "APK files:"
-            find app/build/outputs/apk -name "*.apk" -type f
-        fi
-        
-        if [ -d "app/build/outputs/bundle" ]; then
-            echo "AAB files:"
-            find app/build/outputs/bundle -name "*.aab" -type f
-        fi
+        find app/build/outputs -name "*.apk" -o -name "*.aab" 2>/dev/null || echo "No outputs found"
     
     # Step 7: Create artifact directories
     - name: Create artifact directories
@@ -502,55 +468,23 @@ jobs:
           echo "✅ APK files copied to latest/"
         fi
         
-        if [ -d "app/build/outputs/bundle" ]; then
-          cp -r app/build/outputs/bundle/* artifacts/latest/ 2>/dev/null || true
-          echo "✅ AAB files copied to latest/"
-        fi
-        
-        # Copy to backup directory with timestamp
+        # Copy to backup directory
         BACKUP_DIR=$(ls -d artifacts/backup-* | head -1)
         if [ -d "app/build/outputs/apk" ]; then
           cp -r app/build/outputs/apk/* $BACKUP_DIR/ 2>/dev/null || true
           echo "✅ APK files copied to backup/"
         fi
         
-        if [ -d "app/build/outputs/bundle" ]; then
-          cp -r app/build/outputs/bundle/* $BACKUP_DIR/ 2>/dev/null || true
-          echo "✅ AAB files copied to backup/"
-        fi
-        
-        # Copy any other APK/AAB files
-        find app/build -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
+        # Copy any APK files found
+        find app/build -name "*.apk" 2>/dev/null | while read file; do
           cp "$file" artifacts/latest/ 2>/dev/null || true
           cp "$file" $BACKUP_DIR/ 2>/dev/null || true
         done
         
         echo "📦 Artifacts copied successfully"
-        
-        # List artifacts
-        if [ -d "artifacts/latest" ]; then
-          echo "Contents of artifacts/latest/:"
-          ls -la artifacts/latest/ || echo "No files in latest directory"
-        fi
+        ls -la artifacts/latest/ || echo "No files"
     
-    # Step 9: Commit and push changes to repository (if project was created)
-    - name: Commit and push Android project
-      if: success()
-      run: |
-        # Check if there are changes to commit
-        if [ -n "$(git status --porcelain)" ]; then
-          echo "📝 Changes detected, committing to repository..."
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git add .
-          git commit -m "Add Android project with Gradle 9.2.1 and Compose [skip ci]"
-          git push origin HEAD:${{ github.ref_name }}
-          echo "✅ Changes pushed to repository"
-        else
-          echo "✅ No changes to commit"
-        fi
-    
-    # Step 10: Upload latest artifacts
+    # Step 9: Upload latest artifacts
     - name: Upload latest artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -559,19 +493,11 @@ jobs:
         retention-days: 7
       if: always()
     
-    # Step 11: Upload backup artifacts
+    # Step 10: Upload backup artifacts
     - name: Upload backup artifacts
       uses: actions/upload-artifact@v4
       with:
         name: android-backup-build-${{ github.run_id }}
         path: artifacts/backup-*/
         retention-days: 30
-      if: always()
-    
-    # Step 12: Clean up
-    - name: Clean up
-      run: |
-        echo "🧹 Cleaning up..."
-        ./gradlew clean --no-daemon || true
-        echo "✅ Cleanup completed"
       if: always()
