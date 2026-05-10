@@ -1,4 +1,4 @@
-name: Gradle Dependencies
+name: Android Project Setup and Build
 
 on:
   push:
@@ -6,213 +6,46 @@ on:
   workflow_dispatch:
 
 jobs:
-  download-dependencies:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
       
-      - name: Setup Java
+      - name: Setup JDK
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
           java-version: '17'
+          distribution: 'temurin'
       
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
       
-      - name: Create Gradle properties
+      - name: Create Android project
         run: |
-          # Create gradle.properties if it doesn't exist
-          if [ ! -f "gradle.properties" ]; then
-            cat > gradle.properties << 'EOF'
-          # Project-wide Gradle settings
-          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
-            echo "gradle.properties created"
-          fi
+          chmod +x scripts/create_android_project.sh
+          ./scripts/create_android_project.sh
       
-      - name: Create settings.gradle.kts
-        run: |
-          if [ ! -f "settings.gradle.kts" ]; then
-            cat > settings.gradle.kts << 'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "MyApplication"
-          include(":app")
-          EOF
-            echo "settings.gradle.kts created"
-          fi
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
       
-      - name: Create build.gradle.kts (root)
+      - name: Build project
         run: |
-          if [ ! -f "build.gradle.kts" ]; then
-            cat > build.gradle.kts << 'EOF'
-          plugins {
-              id("com.android.application") version "8.5.2" apply false
-          }
-          EOF
-            echo "build.gradle.kts created with AGP 8.5.2"
-          else
-            # Fix existing build.gradle.kts to use correct AGP version
-            echo "Updating existing build.gradle.kts..."
-            sed -i 's/version "9.0.0"/version "8.5.2"/g' build.gradle.kts
-          fi
-      
-      - name: Create app/build.gradle.kts
-        run: |
-          mkdir -p app
-          if [ ! -f "app/build.gradle.kts" ]; then
-            cat > app/build.gradle.kts << 'EOF'
-          plugins {
-              id("com.android.application")
-          }
-          
-          android {
-              namespace = "com.example.myapp"
-              compileSdk = 34
-              
-              defaultConfig {
-                  applicationId = "com.example.myapp"
-                  minSdk = 24
-                  targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
-              }
-              
-              compileOptions {
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }
-          }
-          
-          dependencies {
-              implementation("androidx.core:core-ktx:1.12.0")
-              implementation("androidx.appcompat:appcompat:1.6.1")
-              implementation("com.google.android.material:material:1.11.0")
-              implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-          }
-          EOF
-            echo "app/build.gradle.kts created"
-          fi
-      
-      - name: Generate Gradle wrapper
-        run: |
-          if [ ! -f "gradlew" ]; then
-            echo "gradlew not found, generating wrapper..."
-            # Generate wrapper with specific version
-            gradle wrapper --gradle-version 8.5
-            echo "Wrapper generated"
-          else
-            echo "gradlew already exists"
-            ./gradlew wrapper --gradle-version 8.5
-          fi
-          
-          # Make executable
           chmod +x gradlew
-          
-          # Verify it exists and works
-          ls -la gradlew
-          ./gradlew --version
+          ./gradlew assembleDebug --no-daemon
       
-      - name: Download dependencies
+      - name: Copy artifacts
         run: |
-          echo "Existing build files:"
-          ls -la *.gradle* 2>/dev/null || echo "No root gradle files"
-          ls -la app/*.gradle* 2>/dev/null || echo "No app gradle files"
-          
-          echo "Downloading dependencies from configs..."
-          
-          # Try to resolve dependencies
-          ./gradlew build --dry-run --no-daemon || true
-          ./gradlew dependencies --no-daemon || true
-          
-          echo "Dependency download completed"
-          echo "Total cache size: $(du -sh $HOME/.gradle/caches | cut -f1)"
+          mkdir -p artifacts/latest artifacts/backup
+          cp -r app/build/outputs/apk/* artifacts/latest/
+          cp -r app/build/outputs/apk/* artifacts/backup/
       
-      - name: Zip and split Gradle cache
-        run: |
-          echo "Zipping Gradle cache..."
-          
-          mkdir -p gradle-cache
-          
-          # Zip the entire Gradle cache
-          zip -r gradle-cache/gradle-cache.zip $HOME/.gradle/caches $HOME/.gradle/wrapper 2>/dev/null || true
-          
-          # Create checksum
-          sha256sum gradle-cache/gradle-cache.zip > gradle-cache/checksum.txt 2>/dev/null || echo "No zip file created" > gradle-cache/checksum.txt
-          
-          # Split into 95MB parts (GitHub's limit is 100MB)
-          if [ -f gradle-cache/gradle-cache.zip ]; then
-            cd gradle-cache
-            split -b 95m gradle-cache.zip gradle-cache.zip.part-
-            rm gradle-cache.zip
-            cd ..
-          else
-            echo "Warning: gradle-cache.zip not created, creating empty placeholder"
-            mkdir -p gradle-cache
-            echo "No cache generated" > gradle-cache/README.md
-          fi
-          
-          # Create restore script
-          cat > gradle-cache/restore.sh << 'SCRIPT_EOF'
-          #!/bin/bash
-          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-          cd "$SCRIPT_DIR"
-          
-          echo "Restoring Gradle cache from split parts..."
-          PART_COUNT=$(ls gradle-cache.zip.part-* 2>/dev/null | wc -l)
-          if [ $PART_COUNT -eq 0 ]; then
-              echo "ERROR: No part files found"
-              exit 1
-          fi
-          
-          echo "Found $PART_COUNT parts"
-          cat gradle-cache.zip.part-* > gradle-cache.zip
-          
-          if sha256sum -c checksum.txt 2>/dev/null; then
-              echo "✓ Checksum verified"
-          else
-              echo "WARNING: Checksum verification failed"
-          fi
-          
-          unzip -q gradle-cache.zip -d $HOME/
-          rm gradle-cache.zip
-          echo "✅ Gradle cache restored successfully!"
-          echo "Cache location: ~/.gradle/caches/"
-          SCRIPT_EOF
-          
-          chmod +x gradle-cache/restore.sh
-          
-          cat > gradle-cache/README.md << 'README_EOF'
-          # Gradle Cache from Your Partial Configs
-          
-          This cache was generated using your repository's partial Gradle/Android configurations.
-          
-          ## Requirements
-          - Java 17 or higher
-          - Gradle 8.5 or higher
-          
-          ## Restore Cache
-          ```bash
-          ./restore.sh
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build
+          path: artifacts/
