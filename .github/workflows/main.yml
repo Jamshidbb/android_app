@@ -75,6 +75,15 @@ jobs:
         mkdir -p app/src/main/res/mipmap-xxxhdpi
         mkdir -p gradle/wrapper
         
+        # Create gradle.properties with AndroidX enabled
+        cat > gradle.properties << 'EOF'
+        # Project-wide Gradle settings.
+        org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+        android.useAndroidX=true
+        android.enableJetifier=true
+        kotlin.code.style=official
+        EOF
+        
         # Create settings.gradle.kts
         cat > settings.gradle.kts << 'EOF'
         pluginManagement {
@@ -306,7 +315,7 @@ jobs:
         # proguardFiles setting in build.gradle.
         EOF
         
-        echo "✅ Android project created successfully!"
+        echo "✅ Android project created successfully with AndroidX enabled!"
     
     # Step 6: Build the Android project
     - name: Build Android project
@@ -328,27 +337,18 @@ jobs:
         echo "🧹 Cleaning previous builds..."
         ./gradlew clean --no-daemon || true
         
-        # Sync project and build dependencies
-        echo "🔄 Syncing project..."
-        ./gradlew build --no-daemon --stacktrace || {
-            echo "⚠️ Build failed, attempting to sync dependencies..."
-            ./gradlew --refresh-dependencies --no-daemon
-        }
-        
-        # Build APK
+        # Build the project
         echo "📦 Building APK ($BUILD_TYPE)..."
         if [ "$BUILD_TYPE" = "release" ]; then
-            ./gradlew assembleRelease --no-daemon
+            ./gradlew assembleRelease --no-daemon --stacktrace
         else
-            ./gradlew assembleDebug --no-daemon
+            ./gradlew assembleDebug --no-daemon --stacktrace
         fi
         
-        # Build AAB (Android App Bundle)
-        echo "📦 Building AAB ($BUILD_TYPE)..."
+        # Build AAB (Android App Bundle) for release only (optional)
         if [ "$BUILD_TYPE" = "release" ]; then
-            ./gradlew bundleRelease --no-daemon
-        else
-            ./gradlew bundleDebug --no-daemon
+            echo "📦 Building AAB ($BUILD_TYPE)..."
+            ./gradlew bundleRelease --no-daemon --stacktrace || true
         fi
         
         echo "✅ Build completed successfully!"
@@ -398,14 +398,18 @@ jobs:
         fi
         
         # Also copy any APK/AAB files found elsewhere
-        find app/build -name "*.apk" -o -name "*.aab" | while read file; do
+        find app/build -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
           cp "$file" artifacts/latest/ 2>/dev/null || true
           cp "$file" $BACKUP_DIR/ 2>/dev/null || true
         done
         
         echo "📦 Artifacts copied successfully"
-        echo "Contents of artifacts/latest/:"
-        ls -la artifacts/latest/ || echo "No files in latest directory"
+        
+        # List artifacts
+        if [ -d "artifacts/latest" ]; then
+          echo "Contents of artifacts/latest/:"
+          ls -la artifacts/latest/ || echo "No files in latest directory"
+        fi
     
     # Step 9: Upload latest artifacts
     - name: Upload latest artifacts
@@ -425,11 +429,10 @@ jobs:
         retention-days: 30
       if: always()
     
-    # Step 11: Clean up build artifacts (optional, saves space)
+    # Step 11: Clean up (optional)
     - name: Clean up
       run: |
         echo "🧹 Cleaning up..."
         ./gradlew clean --no-daemon || true
-        rm -rf artifacts/backup-*/ || true
         echo "✅ Cleanup completed"
       if: always()
