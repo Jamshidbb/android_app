@@ -1,4 +1,4 @@
-name: Build and Push Artifacts
+name: Android Project Setup, Build and Push Artifacts
 
 on:
   push:
@@ -59,34 +59,27 @@ jobs:
     - name: Create Android project (if needed)
       id: create_project
       run: |
-        # Check if project already exists
         if [ -f "app/build.gradle.kts" ] || [ -f "app/build.gradle" ]; then
-            echo "✅ Android project already exists. Skipping creation."
+            echo "✅ Android project already exists."
             echo "project_created=false" >> $GITHUB_OUTPUT
             exit 0
         fi
         
         echo "project_created=true" >> $GITHUB_OUTPUT
-        echo "📱 Creating new Android project with Gradle 9.2.1..."
+        echo "📱 Creating new Android project..."
         
-        # Create directory structure
         mkdir -p app/src/main/java/com/taak/tvhclient/ui/theme
         mkdir -p app/src/main/res/values
-        mkdir -p app/src/main/res/xml
         mkdir -p gradle/wrapper
         
-        # Create gradle.properties
         cat > gradle.properties << 'EOF'
         org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
         android.useAndroidX=true
         android.enableJetifier=true
         kotlin.code.style=official
-        android.bundle.enableUncompressedNativeLibs=false
-        android.nativeLib.strip=false
         android.nativeLib.ignoreStripErrors=true
         EOF
         
-        # Create settings.gradle.kts
         cat > settings.gradle.kts << 'EOF'
         pluginManagement {
             repositories {
@@ -106,7 +99,6 @@ jobs:
         include(":app")
         EOF
         
-        # Create gradle-wrapper.properties with Gradle 9.2.1
         cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
         distributionBase=GRADLE_USER_HOME
         distributionPath=wrapper/dists
@@ -118,7 +110,6 @@ jobs:
         zipStorePath=wrapper/dists
         EOF
         
-        # Create gradle/libs.versions.toml
         mkdir -p gradle
         cat > gradle/libs.versions.toml << 'EOF'
         [versions]
@@ -128,9 +119,6 @@ jobs:
         lifecycleRuntimeKtx = "2.8.4"
         activityCompose = "1.9.0"
         composeBom = "2024.09.00"
-        junit = "4.13.2"
-        junitVersion = "1.2.1"
-        espressoCore = "3.6.1"
         
         [libraries]
         androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -142,75 +130,49 @@ jobs:
         androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
         androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
         junit = { group = "junit", name = "junit", version.ref = "junit" }
-        androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
-        androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
-        androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
-        androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
-        androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
         
         [plugins]
         android-application = { id = "com.android.application", version.ref = "agp" }
-        kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
         kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
         EOF
         
-        # Create build.gradle.kts
         cat > build.gradle.kts << 'EOF'
         plugins {
             alias(libs.plugins.android.application) apply false
-            alias(libs.plugins.kotlin.android) apply false
             alias(libs.plugins.kotlin.compose) apply false
         }
         EOF
         
-        # Create app/build.gradle.kts
         cat > app/build.gradle.kts << 'EOF'
         plugins {
             alias(libs.plugins.android.application)
-            alias(libs.plugins.kotlin.android)
             alias(libs.plugins.kotlin.compose)
         }
         
         android {
             namespace = "com.taak.tvhclient"
             compileSdk = 34
-        
             defaultConfig {
                 applicationId = "com.taak.tvhclient"
                 minSdk = 24
                 targetSdk = 34
                 versionCode = 1
                 versionName = "1.0"
-        
                 testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
             }
-        
             buildTypes {
                 release {
                     isMinifyEnabled = false
-                    proguardFiles(
-                        getDefaultProguardFile("proguard-android-optimize.txt"),
-                        "proguard-rules.pro"
-                    )
+                    proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
                 }
             }
             compileOptions {
                 sourceCompatibility = JavaVersion.VERSION_11
                 targetCompatibility = JavaVersion.VERSION_11
             }
-            kotlinOptions {
-                jvmTarget = "11"
-            }
-            buildFeatures {
-                compose = true
-            }
-            
-            packaging {
-                jniLibs.useLegacyPackaging = true
-                resources {
-                    excludes += "/META-INF/{AL2.0,LGPL2.1}"
-                }
-            }
+            kotlinOptions { jvmTarget = "11" }
+            buildFeatures { compose = true }
+            packaging { jniLibs.useLegacyPackaging = true }
         }
         
         dependencies {
@@ -223,373 +185,148 @@ jobs:
             implementation(libs.androidx.compose.ui.tooling.preview)
             implementation(libs.androidx.compose.material3)
             testImplementation(libs.junit)
-            androidTestImplementation(libs.androidx.junit)
-            androidTestImplementation(libs.androidx.espresso.core)
-            androidTestImplementation(platform(libs.androidx.compose.bom))
-            androidTestImplementation(libs.androidx.compose.ui.test.junit4)
-            debugImplementation(libs.androidx.compose.ui.tooling)
-            debugImplementation(libs.androidx.compose.ui.test.manifest)
         }
         EOF
         
-        # Create MainActivity.kt
         mkdir -p app/src/main/java/com/taak/tvhclient
         cat > app/src/main/java/com/taak/tvhclient/MainActivity.kt << 'EOF'
         package com.taak.tvhclient
-        
         import android.os.Bundle
         import androidx.activity.ComponentActivity
         import androidx.activity.compose.setContent
-        import androidx.compose.foundation.layout.Arrangement
-        import androidx.compose.foundation.layout.Column
-        import androidx.compose.foundation.layout.fillMaxSize
-        import androidx.compose.foundation.layout.padding
-        import androidx.compose.material3.MaterialTheme
-        import androidx.compose.material3.Surface
-        import androidx.compose.material3.Text
-        import androidx.compose.runtime.Composable
+        import androidx.compose.foundation.layout.*
+        import androidx.compose.material3.*
+        import androidx.compose.runtime.*
         import androidx.compose.ui.Alignment
         import androidx.compose.ui.Modifier
-        import androidx.compose.ui.tooling.preview.Preview
         import androidx.compose.ui.unit.dp
         import androidx.compose.ui.unit.sp
-        import com.taak.tvhclient.ui.theme.TVHClientTheme
         
         class MainActivity : ComponentActivity() {
             override fun onCreate(savedInstanceState: Bundle?) {
                 super.onCreate(savedInstanceState)
                 setContent {
-                    TVHClientTheme {
-                        Surface(
-                            modifier = Modifier.fillMaxSize(),
-                            color = MaterialTheme.colorScheme.background
-                        ) {
-                            GreetingScreen()
+                    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize()) {
+                            Text(text = "Welcome to TVH Client!", fontSize = 24.sp)
+                            Text(text = "Android TVHeadend Client", fontSize = 16.sp, modifier = Modifier.padding(top = 8.dp))
                         }
                     }
                 }
             }
         }
-        
-        @Composable
-        fun GreetingScreen() {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "Welcome to TVH Client!",
-                    fontSize = 24.sp,
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Text(
-                    text = "Android TVHeadend Client",
-                    fontSize = 16.sp,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-            }
-        }
-        
-        @Preview(showBackground = true)
-        @Composable
-        fun GreetingScreenPreview() {
-            TVHClientTheme {
-                GreetingScreen()
-            }
-        }
         EOF
         
-        # Create theme files
-        mkdir -p app/src/main/java/com/taak/tvhclient/ui/theme
-        cat > app/src/main/java/com/taak/tvhclient/ui/theme/Theme.kt << 'EOF'
-        package com.taak.tvhclient.ui.theme
-        
-        import androidx.compose.foundation.isSystemInDarkTheme
-        import androidx.compose.material3.MaterialTheme
-        import androidx.compose.material3.darkColorScheme
-        import androidx.compose.material3.lightColorScheme
-        import androidx.compose.runtime.Composable
-        
-        private val DarkColorScheme = darkColorScheme(
-            primary = Purple80,
-            secondary = PurpleGrey80,
-            tertiary = Pink80
-        )
-        
-        private val LightColorScheme = lightColorScheme(
-            primary = Purple40,
-            secondary = PurpleGrey40,
-            tertiary = Pink40
-        )
-        
-        @Composable
-        fun TVHClientTheme(
-            darkTheme: Boolean = isSystemInDarkTheme(),
-            content: @Composable () -> Unit
-        ) {
-            val colorScheme = when {
-                darkTheme -> DarkColorScheme
-                else -> LightColorScheme
-            }
-        
-            MaterialTheme(
-                colorScheme = colorScheme,
-                typography = Typography,
-                content = content
-            )
-        }
-        EOF
-        
-        cat > app/src/main/java/com/taak/tvhclient/ui/theme/Color.kt << 'EOF'
-        package com.taak.tvhclient.ui.theme
-        
-        import androidx.compose.ui.graphics.Color
-        
-        val Purple80 = Color(0xFFD0BCFF)
-        val PurpleGrey80 = Color(0xFFCCC2DC)
-        val Pink80 = Color(0xFFEFB8C8)
-        
-        val Purple40 = Color(0xFF6650a4)
-        val PurpleGrey40 = Color(0xFF625b71)
-        val Pink40 = Color(0xFF7D5260)
-        EOF
-        
-        cat > app/src/main/java/com/taak/tvhclient/ui/theme/Type.kt << 'EOF'
-        package com.taak.tvhclient.ui.theme
-        
-        import androidx.compose.material3.Typography
-        import androidx.compose.ui.text.TextStyle
-        import androidx.compose.ui.text.font.FontFamily
-        import androidx.compose.ui.text.font.FontWeight
-        import androidx.compose.ui.unit.sp
-        
-        val Typography = Typography(
-            bodyLarge = TextStyle(
-                fontFamily = FontFamily.Default,
-                fontWeight = FontWeight.Normal,
-                fontSize = 16.sp,
-                lineHeight = 24.sp,
-                letterSpacing = 0.5.sp
-            )
-        )
-        EOF
-        
-        # Create resource files
         cat > app/src/main/res/values/strings.xml << 'EOF'
-        <resources>
-            <string name="app_name">TVH Client</string>
-        </resources>
+        <resources><string name="app_name">TVH Client</string></resources>
         EOF
         
         cat > app/src/main/res/values/themes.xml << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
         <resources>
-            <style name="Theme.TVHClient" parent="android:Theme.Material.Light.NoActionBar">
-                <item name="android:statusBarColor">@color/purple_700</item>
-                <item name="android:windowBackground">@color/white</item>
-            </style>
-            
-            <color name="purple_200">#FFBB86FC</color>
-            <color name="purple_500">#FF6200EE</color>
-            <color name="purple_700">#FF3700B3</color>
-            <color name="teal_200">#FF03DAC5</color>
-            <color name="teal_700">#FF018786</color>
-            <color name="black">#FF000000</color>
-            <color name="white">#FFFFFFFF</color>
+            <style name="Theme.TVHClient" parent="android:Theme.Material.Light.NoActionBar"/>
         </resources>
         EOF
         
-        # Create AndroidManifest.xml
         cat > app/src/main/AndroidManifest.xml << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-            <application
-                android:allowBackup="true"
-                android:icon="@android:drawable/sym_def_app_icon"
-                android:label="@string/app_name"
-                android:supportsRtl="true"
-                android:theme="@style/Theme.TVHClient">
-                <activity
-                    android:name=".MainActivity"
-                    android:exported="true"
-                    android:configChanges="orientation|screenSize|keyboardHidden">
-                    <intent-filter>
-                        <action android:name="android.intent.action.MAIN" />
-                        <category android:name="android.intent.category.LAUNCHER" />
-                    </intent-filter>
+            <application android:allowBackup="true" android:icon="@android:drawable/sym_def_app_icon" android:label="@string/app_name" android:theme="@style/Theme.TVHClient">
+                <activity android:name=".MainActivity" android:exported="true">
+                    <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
                 </activity>
             </application>
         </manifest>
         EOF
         
-        # Create proguard-rules.pro
         echo '# Add project specific ProGuard rules here.' > app/proguard-rules.pro
         
-        # Download gradle-wrapper.jar
-        curl -s -L -o gradle/wrapper/gradle-wrapper.jar \
-            https://raw.githubusercontent.com/gradle/gradle/v9.2.1/gradle/wrapper/gradle-wrapper.jar
+        curl -s -L -o gradle/wrapper/gradle-wrapper.jar https://raw.githubusercontent.com/gradle/gradle/v9.2.1/gradle/wrapper/gradle-wrapper.jar
         
-        # Create gradlew script
-        cat > gradlew << 'EOF'
-        #!/bin/sh
-        exec "$JAVA_HOME/bin/java" -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
-        EOF
-        
+        echo '#!/bin/sh' > gradlew
+        echo 'exec "$JAVA_HOME/bin/java" -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"' >> gradlew
         chmod +x gradlew
         
-        echo "✅ Android project created successfully"
+        echo "✅ Android project created"
     
-    # Step 6: Download dependencies and build
-    - name: Download dependencies and build
+    # Step 6: Build
+    - name: Build Android project
       run: |
         chmod +x gradlew
-        
-        echo "📦 Downloading dependencies..."
         ./gradlew dependencies --no-daemon || true
-        
         BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
-        
-        echo "🔨 Building Android project ($BUILD_TYPE)..."
-        
         if [ "$BUILD_TYPE" = "release" ]; then
             ./gradlew assembleRelease --no-daemon --stacktrace
         else
             ./gradlew assembleDebug --no-daemon --stacktrace
         fi
-        
         echo "✅ Build completed!"
     
-    # Step 7: Prepare artifacts for repository
-    - name: Prepare artifacts for repository
+    # Step 7: Prepare artifacts
+    - name: Prepare artifacts
       run: |
-        # Create artifacts directory in repo
         mkdir -p repo-artifacts/build-$(date +'%Y%m%d-%H%M%S')
         ARTIFACT_DIR="repo-artifacts/build-$(date +'%Y%m%d-%H%M%S')"
         
-        # Copy APKs
         if [ -d "app/build/outputs/apk" ]; then
             cp -r app/build/outputs/apk/* "$ARTIFACT_DIR/" 2>/dev/null || true
-            echo "✅ APK files copied to $ARTIFACT_DIR"
         fi
         
-        # Copy gradle cache (preserving structure)
         if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
             mkdir -p "$ARTIFACT_DIR/gradle-cache"
             cp -r ~/.gradle/caches/modules-2/files-2.1/* "$ARTIFACT_DIR/gradle-cache/" 2>/dev/null || true
-            echo "✅ Gradle cache copied"
         fi
         
-        # Create version info
-        cat > "$ARTIFACT_DIR/version-info.json" << EOF
-        {
-            "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-            "build_type": "${{ github.event.inputs.build_type || 'debug' }}",
-            "gradle_version": "9.2.1",
-            "run_id": "${{ github.run_id }}",
-            "run_number": "${{ github.run_number }}",
-            "commit_sha": "${{ github.sha }}"
-        }
-        EOF
-        
-        # Create README
-        cat > "$ARTIFACT_DIR/README.md" << EOF
-        # Android Build Artifacts - $(date +'%Y-%m-%d %H:%M:%S')
-        
-        Build Type: ${{ github.event.inputs.build_type || 'debug' }}
-        Gradle Version: 9.2.1
-        Run ID: ${{ github.run_id }}
-        
-        ## Contents:
-        - APK files
-        - Gradle cache with all Maven dependencies (preserves structure)
-        
-        ## To use locally:
-        1. Copy gradle-cache to ~/.gradle/caches/
-        2. Install APK: adb install *.apk
-        EOF
-        
-        # Create a manifest of all files in this build
-        find "$ARTIFACT_DIR" -type f -exec md5sum {} \; > "$ARTIFACT_DIR/manifest.txt"
+        echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"build_type\":\"${{ github.event.inputs.build_type || 'debug' }}\",\"run_id\":\"${{ github.run_id }}\"}" > "$ARTIFACT_DIR/version.json"
         
         echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
-        
-        # List all files
-        echo "========================================="
-        echo "📦 Artifacts prepared for repository:"
-        echo "========================================="
-        find "$ARTIFACT_DIR" -type f | head -20
-        echo "Total files: $(find "$ARTIFACT_DIR" -type f | wc -l)"
-        echo "========================================="
+        echo "✅ Artifacts prepared at: $ARTIFACT_DIR"
     
-    # Step 8: Split large files and push to repository
-    - name: Split large files and push to repository
+    # Step 8: Split large files and push to repo
+    - name: Split and push artifacts
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         
-        # Function to split large files
-        split_large_files() {
-            local dir="$1"
-            local max_size_mb=95  # 95MB to be safe under 100MB limit
+        # Find and split large files (>95MB)
+        find "$ARTIFACT_DIR" -type f -size +95M | while read file; do
+            echo "Splitting large file: $(basename "$file") ($(du -h "$file" | cut -f1))"
+            split -b 95M -d "$file" "${file}.part"
+            rm "$file"
+            echo "Split into $(ls ${file}.part* 2>/dev/null | wc -l) parts"
             
-            find "$dir" -type f -size +${max_size_mb}M | while read file; do
-                echo "⚠️ Large file detected: $file ($(du -h "$file" | cut -f1))"
-                
-                # Split the file into 95MB parts
-                split -b 95M -d "$file" "${file}.part"
-                rm "$file"
-                
-                # Create reassembly info file
-                cat > "${file}.reassemble.txt" << REASSEMBLE_INFO
-                Original file: $(basename "$file")
-                Split into parts: $(ls ${file}.part* 2>/dev/null | wc -l)
-                To reassemble: cat ${file}.part* > $(basename "$file")
-                REASSEMBLE_INFO
-                
-                echo "  ✅ Split into $(ls ${file}.part* 2>/dev/null | wc -l) parts"
-            done
-        }
+            # Create info file using printf instead of heredoc
+            printf "Original file: %s\n" "$(basename "$file")" > "${file}.info"
+            printf "Split into parts\n" >> "${file}.info"
+            printf "To reassemble: cat %s.part* > %s\n" "$(basename "$file")" "$(basename "$file")" >> "${file}.info"
+        done
         
-        # Split large files in artifacts
-        split_large_files "$ARTIFACT_DIR"
-        
-        # Add all artifact files to git
+        # Add all artifact files
         git add "$ARTIFACT_DIR/"
         
-        # Check if there are changes
         if git diff --staged --quiet && git diff --quiet; then
-            echo "ℹ️ No changes to commit"
+            echo "No changes to commit"
         else
-            echo "📝 Committing artifacts to repository..."
+            echo "Committing artifacts..."
             git commit -m "Add build artifacts from run #${{ github.run_number }} [skip ci]"
-            
-            # Push to repository (handles large files by pushing in chunks)
-            echo "🔼 Pushing to repository (this may take a while for large files)..."
             git push origin HEAD:${GITHUB_REF#refs/heads/}
             echo "✅ Artifacts pushed to repository"
         fi
     
-    # Step 9: Create and push a latest symlink/info file
+    # Step 9: Update latest build reference
     - name: Update latest build reference
       run: |
-        # Create or update latest-build symlink info
         echo "$ARTIFACT_DIR" > repo-artifacts/latest-build.txt
-        echo "Latest build: $ARTIFACT_DIR" >> repo-artifacts/latest-build.txt
-        echo "Build time: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> repo-artifacts/latest-build.txt
-        echo "Build type: ${{ github.event.inputs.build_type || 'debug' }}" >> repo-artifacts/latest-build.txt
+        echo "Updated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> repo-artifacts/latest-build.txt
         
         git add repo-artifacts/latest-build.txt
-        
         git commit -m "Update latest build reference [skip ci]" || true
         git push origin HEAD:${GITHUB_REF#refs/heads/} || true
         
         echo "✅ Latest build reference updated"
     
-    # Step 10: Upload to GitHub Actions artifacts (backup)
-    - name: Upload to GitHub Actions artifacts
+    # Step 10: Upload to GitHub Actions
+    - name: Upload to GitHub Actions
       uses: actions/upload-artifact@v4
       with:
         name: android-build-${{ github.run_number }}
@@ -598,25 +335,14 @@ jobs:
       if: always()
     
     # Step 11: Summary
-    - name: Build summary
+    - name: Summary
       run: |
         echo "=========================================="
-        echo "✅ BUILD AND PUSH COMPLETE"
+        echo "✅ BUILD COMPLETE"
         echo "=========================================="
-        echo "Project Created: ${{ steps.create_project.outputs.project_created }}"
-        echo "Build Type: ${{ github.event.inputs.build_type || 'debug' }}"
+        echo "Artifacts location: $ARTIFACT_DIR"
+        echo "Latest build: repo-artifacts/latest-build.txt"
         echo ""
-        echo "📁 Artifacts location in repository:"
-        echo "  $ARTIFACT_DIR"
-        echo ""
-        echo "📄 Latest build reference:"
-        echo "  repo-artifacts/latest-build.txt"
-        echo ""
-        echo "📦 Artifacts uploaded to GitHub Actions as well"
-        echo "=========================================="
-        
-        # Show any split files
-        echo ""
-        echo "🔍 Large files that were split:"
-        find "$ARTIFACT_DIR" -name "*.part*" | head -10 || echo "  No large files needed splitting"
+        echo "Large files split into <100MB parts:"
+        find "$ARTIFACT_DIR" -name "*.part*" | wc -l | xargs echo "  Parts count:"
         echo "=========================================="
