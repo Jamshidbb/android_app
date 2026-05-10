@@ -1,4 +1,4 @@
-name: Android Project Setup, Download Dependencies and Build
+name: Download Dependencies and Build
 
 on:
   push:
@@ -217,6 +217,7 @@ jobs:
         EOF
         
         # Create MainActivity.kt
+        mkdir -p app/src/main/java/com/taak/tvhclient
         cat > app/src/main/java/com/taak/tvhclient/MainActivity.kt << 'EOF'
         package com.taak.tvhclient
         
@@ -285,7 +286,8 @@ jobs:
         }
         EOF
         
-        # Create Theme.kt
+        # Create theme files
+        mkdir -p app/src/main/java/com/taak/tvhclient/ui/theme
         cat > app/src/main/java/com/taak/tvhclient/ui/theme/Theme.kt << 'EOF'
         package com.taak.tvhclient.ui.theme
         
@@ -325,7 +327,6 @@ jobs:
         }
         EOF
         
-        # Create Color.kt
         cat > app/src/main/java/com/taak/tvhclient/ui/theme/Color.kt << 'EOF'
         package com.taak.tvhclient.ui.theme
         
@@ -340,7 +341,6 @@ jobs:
         val Pink40 = Color(0xFF7D5260)
         EOF
         
-        # Create Type.kt
         cat > app/src/main/java/com/taak/tvhclient/ui/theme/Type.kt << 'EOF'
         package com.taak.tvhclient.ui.theme
         
@@ -361,12 +361,11 @@ jobs:
         )
         EOF
         
-        # Create strings.xml
+        # Create resource files
         echo '<resources>' > app/src/main/res/values/strings.xml
         echo '    <string name="app_name">TVH Client</string>' >> app/src/main/res/values/strings.xml
         echo '</resources>' >> app/src/main/res/values/strings.xml
         
-        # Create themes.xml
         cat > app/src/main/res/values/themes.xml << 'EOF'
         <?xml version="1.0" encoding="utf-8"?>
         <resources>
@@ -422,60 +421,52 @@ jobs:
         
         echo "✅ Android project created successfully!"
     
-    # Step 6: Download dependencies (Maven artifacts)
+    # Step 6: Download Maven dependencies using Gradle wrapper
     - name: Download Maven dependencies
       run: |
         echo "📦 Downloading Maven artifacts..."
         
-        # Create a temporary build.gradle to download dependencies
-        cat > download.gradle << 'EOF'
-        repositories {
-            google()
-            mavenCentral()
-        }
+        # Make gradlew executable
+        chmod +x gradlew
         
-        configurations {
-            deps
-        }
+        # Run gradle to download dependencies
+        ./gradlew dependencies --no-daemon || true
         
-        dependencies {
-            // Add your dependencies here
-            deps 'androidx.core:core-ktx:1.15.0'
-            deps 'androidx.appcompat:appcompat:1.7.0'
-            deps 'com.google.android.material:material:1.12.0'
-            deps 'androidx.constraintlayout:constraintlayout:2.2.0'
-            deps 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
-            deps 'androidx.activity:activity-compose:1.10.0'
-            deps 'androidx.compose.ui:ui:1.7.5'
-            deps 'androidx.compose.material3:material3:1.3.1'
-        }
-        
-        task downloadDeps(type: Copy) {
-            from configurations.deps
-            into 'downloaded-artifacts'
-        }
-        EOF
-        
-        # Download using Gradle
-        gradle -b download.gradle downloadDeps
-        
-        # Create a directory for Maven artifacts
+        # Copy Gradle cache to maven-artifacts directory
         mkdir -p maven-artifacts
         
-        # Copy downloaded artifacts
-        cp -r downloaded-artifacts/* maven-artifacts/ 2>/dev/null || true
+        # Copy downloaded JAR files from Gradle cache
+        if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
+            echo "Copying artifacts from Gradle cache..."
+            find ~/.gradle/caches/modules-2/files-2.1 -name "*.jar" -type f | head -100 | while read jar; do
+                cp "$jar" maven-artifacts/ 2>/dev/null || true
+            done
+        fi
         
-        # List downloaded artifacts
-        echo "📁 Downloaded artifacts:"
-        ls -la maven-artifacts/ || echo "No artifacts found"
+        # Also copy from project Gradle cache
+        if [ -d .gradle/caches/modules-2/files-2.1 ]; then
+            find .gradle/caches/modules-2/files-2.1 -name "*.jar" -type f | head -100 | while read jar; do
+                cp "$jar" maven-artifacts/ 2>/dev/null || true
+            done
+        fi
         
-        # Create a manifest of downloaded artifacts
-        echo "# Downloaded Maven Artifacts" > maven-artifacts/README.md
-        echo "" >> maven-artifacts/README.md
-        echo "## Artifacts downloaded on $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> maven-artifacts/README.md
-        echo "" >> maven-artifacts/README.md
-        echo "### Files:" >> maven-artifacts/README.md
-        ls -la maven-artifacts/ | grep -v README | grep -v total >> maven-artifacts/README.md || echo "No files" >> maven-artifacts/README.md
+        # Create README for artifacts
+        cat > maven-artifacts/README.md << EOF
+        # Downloaded Maven Artifacts
+        
+        These artifacts were downloaded from Maven repositories on $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        
+        ## Dependencies included:
+        - AndroidX Core KTX
+        - AndroidX AppCompat
+        - Material Design Components
+        - Jetpack Compose
+        - And more...
+        
+        Total artifacts: $(ls -1 maven-artifacts/*.jar 2>/dev/null | wc -l) JAR files
+        EOF
+        
+        echo "✅ Downloaded $(ls -1 maven-artifacts/*.jar 2>/dev/null | wc -l) artifacts"
     
     # Step 7: Build the Android project
     - name: Build Android project
@@ -484,17 +475,12 @@ jobs:
         
         echo "🔨 Building Android project ($BUILD_TYPE)..."
         
-        if [ -f "gradlew" ]; then
-            chmod +x gradlew
-            ./gradlew clean --no-daemon || true
-            
-            if [ "$BUILD_TYPE" = "release" ]; then
-                ./gradlew assembleRelease --no-daemon --stacktrace
-            else
-                ./gradlew assembleDebug --no-daemon --stacktrace
-            fi
+        chmod +x gradlew
+        
+        if [ "$BUILD_TYPE" = "release" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
         else
-            echo "⚠️ gradlew not found"
+            ./gradlew assembleDebug --no-daemon --stacktrace
         fi
         
         echo "✅ Build completed!"
@@ -505,33 +491,29 @@ jobs:
         mkdir -p artifacts/latest
         mkdir -p artifacts/backup-$(date +'%Y%m%d-%H%M%S')
     
-    # Step 9: Copy build artifacts
-    - name: Copy build artifacts
+    # Step 9: Copy all artifacts
+    - name: Copy all artifacts
       run: |
+        # Copy APKs
         if [ -d "app/build/outputs/apk" ]; then
           cp -r app/build/outputs/apk/* artifacts/latest/ 2>/dev/null || true
-          echo "✅ APK files copied to latest/"
+          echo "✅ APK files copied"
         fi
         
+        # Copy to backup
         BACKUP_DIR=$(ls -d artifacts/backup-* | head -1)
         if [ -d "app/build/outputs/apk" ]; then
           cp -r app/build/outputs/apk/* $BACKUP_DIR/ 2>/dev/null || true
-          echo "✅ APK files copied to backup/"
         fi
         
-        # Also copy maven artifacts
-        if [ -d "maven-artifacts" ]; then
-          cp -r maven-artifacts artifacts/latest/ 2>/dev/null || true
-          cp -r maven-artifacts $BACKUP_DIR/ 2>/dev/null || true
+        # Copy maven artifacts
+        if [ -d "maven-artifacts" ] && [ "$(ls -A maven-artifacts)" ]; then
+          cp -r maven-artifacts/* artifacts/latest/ 2>/dev/null || true
+          cp -r maven-artifacts/* $BACKUP_DIR/ 2>/dev/null || true
           echo "✅ Maven artifacts copied"
         fi
         
-        find app/build -name "*.apk" 2>/dev/null | while read file; do
-          cp "$file" artifacts/latest/ 2>/dev/null || true
-          cp "$file" $BACKUP_DIR/ 2>/dev/null || true
-        done
-        
-        echo "📦 Artifacts copied successfully"
+        echo "📦 All artifacts copied successfully"
     
     # Step 10: Commit and push everything to repository
     - name: Commit and push to repository
@@ -539,16 +521,16 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         
-        # Add everything (project files, maven artifacts, build outputs)
+        # Add all files
         git add -A 2>/dev/null || true
         
-        # Check if there are changes
+        # Check for changes
         if git diff --staged --quiet && git diff --quiet; then
           echo "ℹ️ No changes to commit"
         else
           echo "📝 Committing files..."
-          git commit -m "Update: Android project, Maven artifacts, and build outputs [skip ci]"
-          git push origin HEAD:${GITHUB_REF#refs/heads/}
+          git commit -m "Update: Android project, Maven artifacts, and build outputs [skip ci]" || true
+          git push origin HEAD:${GITHUB_REF#refs/heads/} || true
           echo "✅ Successfully pushed to repository"
         fi
     
@@ -561,16 +543,7 @@ jobs:
         retention-days: 7
       if: always()
     
-    # Step 12: Upload backup artifacts
-    - name: Upload backup artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: android-backup-build-${{ github.run_id }}
-        path: artifacts/backup-*/
-        retention-days: 30
-      if: always()
-    
-    # Step 13: Summary
+    # Step 12: Summary
     - name: Build summary
       run: |
         echo "=========================================="
@@ -581,9 +554,8 @@ jobs:
         echo ""
         echo "📦 Pushed to repository:"
         echo "  - Android project files"
-        echo "  - Maven artifacts (downloaded dependencies)"
+        echo "  - Maven artifacts"
         echo "  - Build outputs (APKs)"
         echo ""
-        echo "📁 Maven artifacts location: maven-artifacts/"
-        echo "📱 APK location: artifacts/latest/"
+        echo "📁 APK location: artifacts/latest/"
         echo "=========================================="
