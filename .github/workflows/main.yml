@@ -43,19 +43,38 @@ jobs:
         api-level: 34
         build-tools: 34.0.0
     
-    # Step 4: Cache Gradle dependencies
-    - name: Cache Gradle packages
+    # Step 4: Cache Gradle dependencies (GitHub cache)
+    - name: Cache Gradle dependencies
       uses: actions/cache@v4
       with:
         path: |
           ~/.gradle/caches
           ~/.gradle/wrapper
           ~/.android/build-cache
-        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
         restore-keys: |
           ${{ runner.os }}-gradle-
     
-    # Step 5: Create Android project if it doesn't exist
+    # Step 5: Restore Maven artifacts from previous build (from repo)
+    - name: Restore Maven artifacts from repo cache
+      id: restore_cache
+      run: |
+        # Find the latest Maven cache archive in repo
+        LATEST_MAVEN_CACHE=$(ls -t maven-cache-*.tar.gz 2>/dev/null | head -1)
+        
+        if [ -n "$LATEST_MAVEN_CACHE" ] && [ -f "$LATEST_MAVEN_CACHE" ]; then
+          echo "📦 Found Maven cache: $LATEST_MAVEN_CACHE"
+          echo "Extracting to ~/.gradle/caches/"
+          mkdir -p ~/.gradle/caches
+          tar -xzf "$LATEST_MAVEN_CACHE" -C ~/.gradle/caches/
+          echo "✅ Maven cache restored"
+          echo "cache_restored=true" >> $GITHUB_OUTPUT
+        else
+          echo "ℹ️ No Maven cache found in repo, will download dependencies"
+          echo "cache_restored=false" >> $GITHUB_OUTPUT
+        fi
+    
+    # Step 6: Create Android project if it doesn't exist
     - name: Create Android project (if needed)
       id: create_project
       run: |
@@ -249,20 +268,29 @@ jobs:
         
         echo "✅ Android project created"
     
-    # Step 6: Build
+    # Step 7: Build Android project (with offline mode if cache available)
     - name: Build Android project
       run: |
         chmod +x gradlew
-        ./gradlew dependencies --no-daemon || true
+        
         BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
-        if [ "$BUILD_TYPE" = "release" ]; then
-            ./gradlew assembleRelease --no-daemon --stacktrace
+        
+        if [ "${{ steps.restore_cache.outputs.cache_restored }}" = "true" ]; then
+          echo "🔌 Attempting offline build using cached Maven artifacts..."
+          if ./gradlew assemble${BUILD_TYPE^} --offline --no-daemon --stacktrace; then
+            echo "✅ Offline build successful!"
+          else
+            echo "⚠️ Offline build failed, falling back to online mode..."
+            ./gradlew assemble${BUILD_TYPE^} --no-daemon --stacktrace
+          fi
         else
-            ./gradlew assembleDebug --no-daemon --stacktrace
+          echo "🌐 No cache available, building online..."
+          ./gradlew assemble${BUILD_TYPE^} --no-daemon --stacktrace
         fi
+        
         echo "✅ Build completed!"
     
-    # Step 7: Prepare and zip artifacts
+    # Step 8: Prepare and zip artifacts (including Maven cache)
     - name: Prepare and zip artifacts
       run: |
         TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
@@ -274,6 +302,7 @@ jobs:
         
         # Create temporary directory for artifacts
         mkdir -p temp-artifacts
+        mkdir -p temp-artifacts/maven-cache
         
         # Copy APK files
         if [ -d "app/build/outputs/apk" ]; then
@@ -281,15 +310,85 @@ jobs:
             echo "✅ Copied APK files"
         fi
         
-        # Copy version info
+        # Copy Maven artifacts (Gradle dependencies)
+        if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
+            echo "📚 Copying Maven artifacts from Gradle cache..."
+            # Copy the actual dependency files
+            cp -r ~/.gradle/caches/modules-2/files-2.1/* temp-artifacts/maven-cache/ 2>/dev/null || true
+            
+            # Count artifacts
+            ARTIFACT_COUNT=$(find temp-artifacts/maven-cache -type f \( -name "*.jar" -o -name "*.aar" -o -name "*.pom" \) 2>/dev/null | wc -l)
+            CACHE_SIZE=$(du -sh temp-artifacts/maven-cache 2>/dev/null | cut -f1)
+            echo "✅ Copied ${ARTIFACT_COUNT} Maven artifacts (${CACHE_SIZE})"
+        fi
+        
+        # Copy Gradle wrapper distributions
+        if [ -d ~/.gradle/wrapper/dists ]; then
+            echo "📦 Copying Gradle wrapper distributions..."
+            cp -r ~/.gradle/wrapper/dists/* temp-artifacts/gradle-wrapper/ 2>/dev/null || true
+            WRAPPER_SIZE=$(du -sh temp-artifacts/gradle-wrapper 2>/dev/null | cut -f1)
+            echo "✅ Copied Gradle wrappers (${WRAPPER_SIZE})"
+        fi
+        
+        # Copy Kotlin compiler cache (optional, speeds up builds)
+        if [ -d ~/.kotlin ]; then
+            echo "🔧 Copying Kotlin compiler cache..."
+            cp -r ~/.kotlin/* temp-artifacts/kotlin-cache/ 2>/dev/null || true
+            KOTLIN_SIZE=$(du -sh temp-artifacts/kotlin-cache 2>/dev/null | cut -f1)
+            echo "✅ Copied Kotlin cache (${KOTLIN_SIZE})"
+        fi
+        
+        # Copy Android build cache
+        if [ -d ~/.android/build-cache ]; then
+            echo "🤖 Copying Android build cache..."
+            cp -r ~/.android/build-cache/* temp-artifacts/android-cache/ 2>/dev/null || true
+            ANDROID_CACHE_SIZE=$(du -sh temp-artifacts/android-cache 2>/dev/null | cut -f1)
+            echo "✅ Copied Android cache (${ANDROID_CACHE_SIZE})"
+        fi
+        
+        # Create version info
         cat > temp-artifacts/version.json << EOF
         {
           "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
           "build_type": "${BUILD_TYPE}",
           "run_id": "${{ github.run_id }}",
           "run_number": "${{ github.run_number }}",
-          "commit_sha": "${{ github.sha }}"
+          "commit_sha": "${{ github.sha }}",
+          "commit_message": "${{ github.event.head_commit.message }}",
+          "maven_artifacts_included": true,
+          "gradle_wrapper_included": true,
+          "kotlin_cache_included": true,
+          "android_cache_included": true
         }
+        EOF
+        
+        # Create a README for the artifact
+        cat > temp-artifacts/README.txt << EOF
+        ===================================
+        Android Build Artifact
+        ===================================
+        
+        Build: ${ARTIFACT_NAME}
+        Date: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+        Type: ${BUILD_TYPE}
+        Run #: ${{ github.run_number }}
+        
+        Contents:
+        - APK files (app-*.apk)
+        - Maven cache (complete Gradle dependencies)
+        - Gradle wrapper distributions
+        - Kotlin compiler cache
+        - Android build cache
+        
+        To restore Maven cache for offline building:
+        1. Extract this zip
+        2. Copy maven-cache/ to ~/.gradle/caches/modules-2/files-2.1/
+        3. Copy gradle-wrapper/ to ~/.gradle/wrapper/dists/
+        4. Copy kotlin-cache/ to ~/.kotlin/
+        5. Copy android-cache/ to ~/.android/build-cache/
+        
+        Or simply extract everything to your Gradle user home directory.
+        ===================================
         EOF
         
         # Create the zip archive
@@ -308,41 +407,70 @@ jobs:
         # Clean up temp directory
         rm -rf temp-artifacts
     
-    # Step 8: Split large zip file if needed and push to repo
+    # Step 9: Create separate Maven cache archive (for faster incremental updates)
+    - name: Create separate Maven cache archive
+      run: |
+        if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
+          echo "📚 Creating separate Maven cache archive..."
+          cd ~/.gradle/caches/
+          tar -czf "${GITHUB_WORKSPACE}/maven-cache-${GITHUB_RUN_ID}.tar.gz" modules-2/
+          cd ${GITHUB_WORKSPACE}
+          
+          MAVEN_CACHE_SIZE=$(du -h "maven-cache-${GITHUB_RUN_ID}.tar.gz" | cut -f1)
+          echo "✅ Separate Maven cache archive created: ${MAVEN_CACHE_SIZE}"
+          echo "MAVEN_CACHE_ARCHIVE=maven-cache-${GITHUB_RUN_ID}.tar.gz" >> $GITHUB_ENV
+        fi
+    
+    # Step 10: Split large files if needed and push to repo
     - name: Split and push artifacts
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         
         ZIP_FILE="$ARTIFACT_ZIP"
-        ZIP_SIZE=$(stat -c%s "$ZIP_FILE" 2>/dev/null || stat -f%z "$ZIP_FILE" 2>/dev/null)
-        MAX_SIZE=$((95 * 1024 * 1024)) # 95MB in bytes
-        
-        if [ $ZIP_SIZE -gt $MAX_SIZE ]; then
-            echo "⚠️ Zip file exceeds 95MB ($(numfmt --to=iec $ZIP_SIZE 2>/dev/null || echo "$ZIP_SIZE bytes")), splitting into parts..."
-            
-            # Split the zip file
-            split -b 95M -d "$ZIP_FILE" "${ZIP_FILE}.part"
-            rm "$ZIP_FILE"
-            
-            # Create reassembly script using printf instead of heredoc
-            REASSEMBLE_SCRIPT="${ZIP_FILE}.sh"
-            echo "#!/bin/bash" > "$REASSEMBLE_SCRIPT"
-            echo "# Reassembly script for split zip file" >> "$REASSEMBLE_SCRIPT"
-            echo "echo \"Reassembling ${ARTIFACT_NAME}.zip...\"" >> "$REASSEMBLE_SCRIPT"
-            echo "cat ${ARTIFACT_NAME}.zip.part* > ${ARTIFACT_NAME}.zip" >> "$REASSEMBLE_SCRIPT"
-            echo "echo \"Done! You can now unzip ${ARTIFACT_NAME}.zip\"" >> "$REASSEMBLE_SCRIPT"
-            chmod +x "$REASSEMBLE_SCRIPT"
-            
-            echo "✅ Zip file split into parts"
-            echo "split_required=true" >> $GITHUB_ENV
-        else
-            echo "✅ Zip file size is within limits ($(du -h "$ZIP_FILE" | cut -f1))"
-            echo "split_required=false" >> $GITHUB_ENV
+        if [ -f "$ZIP_FILE" ]; then
+          ZIP_SIZE=$(stat -c%s "$ZIP_FILE" 2>/dev/null || stat -f%z "$ZIP_FILE" 2>/dev/null)
+          MAX_SIZE=$((95 * 1024 * 1024)) # 95MB in bytes
+          
+          if [ $ZIP_SIZE -gt $MAX_SIZE ]; then
+              echo "⚠️ Zip file exceeds 95MB, splitting into parts..."
+              
+              # Split the zip file
+              split -b 95M -d "$ZIP_FILE" "${ZIP_FILE}.part"
+              rm "$ZIP_FILE"
+              
+              # Create reassembly script
+              REASSEMBLE_SCRIPT="${ZIP_FILE}.sh"
+              echo "#!/bin/bash" > "$REASSEMBLE_SCRIPT"
+              echo "# Reassembly script for split zip file" >> "$REASSEMBLE_SCRIPT"
+              echo "echo \"Reassembling ${ARTIFACT_NAME}.zip...\"" >> "$REASSEMBLE_SCRIPT"
+              echo "cat ${ARTIFACT_NAME}.zip.part* > ${ARTIFACT_NAME}.zip" >> "$REASSEMBLE_SCRIPT"
+              echo "echo \"Done! You can now unzip ${ARTIFACT_NAME}.zip\"" >> "$REASSEMBLE_SCRIPT"
+              chmod +x "$REASSEMBLE_SCRIPT"
+              
+              echo "✅ Zip file split into parts"
+              echo "split_required=true" >> $GITHUB_ENV
+          else
+              echo "✅ Zip file size is within limits ($(du -h "$ZIP_FILE" | cut -f1))"
+              echo "split_required=false" >> $GITHUB_ENV
+          fi
         fi
         
-        # Add artifact files to git
-        git add repo-artifacts/
+        # Also handle separate Maven cache archive if it exists
+        if [ -n "$MAVEN_CACHE_ARCHIVE" ] && [ -f "$MAVEN_CACHE_ARCHIVE" ]; then
+          MAVEN_SIZE=$(stat -c%s "$MAVEN_CACHE_ARCHIVE" 2>/dev/null || stat -f%z "$MAVEN_CACHE_ARCHIVE" 2>/dev/null)
+          MAX_SIZE=$((95 * 1024 * 1024))
+          
+          if [ $MAVEN_SIZE -gt $MAX_SIZE ]; then
+              echo "⚠️ Maven cache archive exceeds 95MB, splitting..."
+              split -b 95M -d "$MAVEN_CACHE_ARCHIVE" "${MAVEN_CACHE_ARCHIVE}.part"
+              rm "$MAVEN_CACHE_ARCHIVE"
+          fi
+        fi
+        
+        # Add all artifacts
+        git add repo-artifacts/ || true
+        git add maven-cache-*.tar.gz* 2>/dev/null || true
         
         if git diff --staged --quiet && git diff --quiet; then
             echo "No changes to commit"
@@ -353,7 +481,22 @@ jobs:
             echo "✅ Artifacts pushed to repository"
         fi
     
-    # Step 9: Update latest build reference
+    # Step 11: Cleanup old cache files (keep last 5)
+    - name: Cleanup old cache files
+      run: |
+        # Keep only last 5 Maven cache archives
+        cd ${GITHUB_WORKSPACE}
+        ls -t maven-cache-*.tar.gz 2>/dev/null | tail -n +6 | xargs -r git rm -f || true
+        
+        # Keep only last 10 build artifacts
+        cd repo-artifacts
+        ls -t android-build-*.zip* 2>/dev/null | tail -n +11 | xargs -r git rm -f || true
+        cd ..
+        
+        git commit -m "Cleanup old cache files [skip ci]" || true
+        git push origin HEAD:${GITHUB_REF#refs/heads/} || true
+    
+    # Step 12: Update latest build reference
     - name: Update latest build reference
       run: |
         # Create or update latest build info
@@ -365,7 +508,8 @@ jobs:
           "build_type": "${{ github.event.inputs.build_type || 'debug' }}",
           "run_id": "${{ github.run_id }}",
           "run_number": "${{ github.run_number }}",
-          "split_required": ${{ env.split_required == 'true' }}
+          "split_required": ${split_required:-false},
+          "maven_cache_archive": "$MAVEN_CACHE_ARCHIVE"
         }
         EOF
         
@@ -375,7 +519,7 @@ jobs:
         
         echo "✅ Latest build reference updated"
     
-    # Step 10: Upload to GitHub Actions
+    # Step 13: Upload to GitHub Actions
     - name: Upload to GitHub Actions
       uses: actions/upload-artifact@v4
       with:
@@ -384,7 +528,16 @@ jobs:
         retention-days: 30
       if: always()
     
-    # Step 11: Summary
+    # Step 14: Upload Maven cache separately (optional)
+    - name: Upload Maven cache to GitHub Actions
+      uses: actions/upload-artifact@v4
+      with:
+        name: maven-cache-${{ github.run_number }}
+        path: maven-cache-*.tar.gz
+        retention-days: 30
+      if: env.MAVEN_CACHE_ARCHIVE != ''
+    
+    # Step 15: Summary
     - name: Summary
       run: |
         echo "=========================================="
@@ -394,12 +547,27 @@ jobs:
         echo "Artifact location: $ARTIFACT_ZIP"
         echo "Latest build: repo-artifacts/latest-build.json"
         echo ""
-        if [ "$split_required" = "true" ]; then
+        if [ -n "$MAVEN_CACHE_ARCHIVE" ]; then
+          echo "📚 Maven cache archive: $MAVEN_CACHE_ARCHIVE"
+          echo "   Size: $(du -h $MAVEN_CACHE_ARCHIVE 2>/dev/null | cut -f1)"
+        fi
+        echo ""
+        if [ "${split_required:-false}" = "true" ]; then
           echo "⚠️  Note: Zip file was split into parts (<100MB each)"
           echo "    Use the provided .sh script to reassemble"
         fi
         echo ""
-        echo "To download the artifact:"
-        echo "  - From GitHub Actions: See 'Upload to GitHub Actions' step"
-        echo "  - From repository: $ARTIFACT_ZIP"
+        echo "Contents of zip:"
+        echo "  - APK files"
+        echo "  - Complete Maven cache (all Gradle dependencies)"
+        echo "  - Gradle wrapper distributions"
+        echo "  - Kotlin compiler cache"
+        echo "  - Android build cache"
+        echo ""
+        echo "To use offline build in future:"
+        echo "  unzip $ARTIFACT_NAME.zip"
+        echo "  cp -r maven-cache/* ~/.gradle/caches/modules-2/files-2.1/"
+        echo "  cp -r gradle-wrapper/* ~/.gradle/wrapper/dists/"
+        echo "  cp -r kotlin-cache/* ~/.kotlin/"
+        echo "  cp -r android-cache/* ~/.android/build-cache/"
         echo "=========================================="
