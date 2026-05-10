@@ -262,53 +262,93 @@ jobs:
         fi
         echo "✅ Build completed!"
     
-    # Step 7: Prepare artifacts
-    - name: Prepare artifacts
+    # Step 7: Prepare and zip artifacts
+    - name: Prepare and zip artifacts
       run: |
-        mkdir -p repo-artifacts/build-$(date +'%Y%m%d-%H%M%S')
-        ARTIFACT_DIR="repo-artifacts/build-$(date +'%Y%m%d-%H%M%S')"
+        TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+        BUILD_TYPE="${{ github.event.inputs.build_type || 'debug' }}"
+        ARTIFACT_NAME="android-build-${BUILD_TYPE}-${TIMESTAMP}"
+        mkdir -p repo-artifacts
         
+        echo "📦 Creating zip archive: ${ARTIFACT_NAME}.zip"
+        
+        # Create temporary directory for artifacts
+        mkdir -p temp-artifacts
+        
+        # Copy APK files
         if [ -d "app/build/outputs/apk" ]; then
-            cp -r app/build/outputs/apk/* "$ARTIFACT_DIR/" 2>/dev/null || true
+            cp -r app/build/outputs/apk/* temp-artifacts/ 2>/dev/null || true
+            echo "✅ Copied APK files"
         fi
         
-        if [ -d ~/.gradle/caches/modules-2/files-2.1 ]; then
-            mkdir -p "$ARTIFACT_DIR/gradle-cache"
-            cp -r ~/.gradle/caches/modules-2/files-2.1/* "$ARTIFACT_DIR/gradle-cache/" 2>/dev/null || true
-        fi
+        # Copy version info
+        cat > temp-artifacts/version.json << EOF
+        {
+          "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+          "build_type": "${BUILD_TYPE}",
+          "run_id": "${{ github.run_id }}",
+          "run_number": "${{ github.run_number }}",
+          "commit_sha": "${{ github.sha }}"
+        }
+        EOF
         
-        echo "{\"timestamp\":\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\",\"build_type\":\"${{ github.event.inputs.build_type || 'debug' }}\",\"run_id\":\"${{ github.run_id }}\"}" > "$ARTIFACT_DIR/version.json"
+        # Create the zip archive
+        cd temp-artifacts
+        zip -r "../repo-artifacts/${ARTIFACT_NAME}.zip" ./*
+        cd ..
         
-        echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> $GITHUB_ENV
-        echo "✅ Artifacts prepared at: $ARTIFACT_DIR"
+        # Get zip file size
+        ZIP_SIZE=$(du -h "repo-artifacts/${ARTIFACT_NAME}.zip" | cut -f1)
+        echo "✅ Created zip archive: ${ARTIFACT_NAME}.zip (${ZIP_SIZE})"
+        
+        # Save artifact name for later steps
+        echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+        echo "ARTIFACT_ZIP=repo-artifacts/${ARTIFACT_NAME}.zip" >> $GITHUB_ENV
+        
+        # Clean up temp directory
+        rm -rf temp-artifacts
     
-    # Step 8: Split large files and push to repo
+    # Step 8: Split large zip file if needed and push to repo
     - name: Split and push artifacts
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
         
-        # Find and split large files (>95MB)
-        find "$ARTIFACT_DIR" -type f -size +95M | while read file; do
-            echo "Splitting large file: $(basename "$file") ($(du -h "$file" | cut -f1))"
-            split -b 95M -d "$file" "${file}.part"
-            rm "$file"
-            echo "Split into $(ls ${file}.part* 2>/dev/null | wc -l) parts"
-            
-            # Create info file using printf instead of heredoc
-            printf "Original file: %s\n" "$(basename "$file")" > "${file}.info"
-            printf "Split into parts\n" >> "${file}.info"
-            printf "To reassemble: cat %s.part* > %s\n" "$(basename "$file")" "$(basename "$file")" >> "${file}.info"
-        done
+        ZIP_FILE="$ARTIFACT_ZIP"
+        ZIP_SIZE=$(stat -c%s "$ZIP_FILE" 2>/dev/null || stat -f%z "$ZIP_FILE" 2>/dev/null)
+        MAX_SIZE=$((95 * 1024 * 1024)) # 95MB in bytes
         
-        # Add all artifact files
-        git add "$ARTIFACT_DIR/"
+        if [ $ZIP_SIZE -gt $MAX_SIZE ]; then
+            echo "⚠️ Zip file exceeds 95MB ($(numfmt --to=iec $ZIP_SIZE 2>/dev/null || echo "$ZIP_SIZE bytes")), splitting into parts..."
+            
+            # Split the zip file
+            split -b 95M -d "$ZIP_FILE" "${ZIP_FILE}.part"
+            rm "$ZIP_FILE"
+            
+            # Create reassembly script using printf instead of heredoc
+            REASSEMBLE_SCRIPT="${ZIP_FILE}.sh"
+            echo "#!/bin/bash" > "$REASSEMBLE_SCRIPT"
+            echo "# Reassembly script for split zip file" >> "$REASSEMBLE_SCRIPT"
+            echo "echo \"Reassembling ${ARTIFACT_NAME}.zip...\"" >> "$REASSEMBLE_SCRIPT"
+            echo "cat ${ARTIFACT_NAME}.zip.part* > ${ARTIFACT_NAME}.zip" >> "$REASSEMBLE_SCRIPT"
+            echo "echo \"Done! You can now unzip ${ARTIFACT_NAME}.zip\"" >> "$REASSEMBLE_SCRIPT"
+            chmod +x "$REASSEMBLE_SCRIPT"
+            
+            echo "✅ Zip file split into parts"
+            echo "split_required=true" >> $GITHUB_ENV
+        else
+            echo "✅ Zip file size is within limits ($(du -h "$ZIP_FILE" | cut -f1))"
+            echo "split_required=false" >> $GITHUB_ENV
+        fi
+        
+        # Add artifact files to git
+        git add repo-artifacts/
         
         if git diff --staged --quiet && git diff --quiet; then
             echo "No changes to commit"
         else
             echo "Committing artifacts..."
-            git commit -m "Add build artifacts from run #${{ github.run_number }} [skip ci]"
+            git commit -m "Add build artifacts: ${ARTIFACT_NAME} [skip ci]"
             git push origin HEAD:${GITHUB_REF#refs/heads/}
             echo "✅ Artifacts pushed to repository"
         fi
@@ -316,10 +356,20 @@ jobs:
     # Step 9: Update latest build reference
     - name: Update latest build reference
       run: |
-        echo "$ARTIFACT_DIR" > repo-artifacts/latest-build.txt
-        echo "Updated: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> repo-artifacts/latest-build.txt
+        # Create or update latest build info
+        cat > repo-artifacts/latest-build.json << EOF
+        {
+          "artifact_name": "$ARTIFACT_NAME",
+          "zip_file": "$ARTIFACT_ZIP",
+          "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+          "build_type": "${{ github.event.inputs.build_type || 'debug' }}",
+          "run_id": "${{ github.run_id }}",
+          "run_number": "${{ github.run_number }}",
+          "split_required": ${{ env.split_required == 'true' }}
+        }
+        EOF
         
-        git add repo-artifacts/latest-build.txt
+        git add repo-artifacts/latest-build.json
         git commit -m "Update latest build reference [skip ci]" || true
         git push origin HEAD:${GITHUB_REF#refs/heads/} || true
         
@@ -329,8 +379,8 @@ jobs:
     - name: Upload to GitHub Actions
       uses: actions/upload-artifact@v4
       with:
-        name: android-build-${{ github.run_number }}
-        path: ${{ env.ARTIFACT_DIR }}/
+        name: ${{ env.ARTIFACT_NAME }}
+        path: ${{ env.ARTIFACT_ZIP }}
         retention-days: 30
       if: always()
     
@@ -340,9 +390,16 @@ jobs:
         echo "=========================================="
         echo "✅ BUILD COMPLETE"
         echo "=========================================="
-        echo "Artifacts location: $ARTIFACT_DIR"
-        echo "Latest build: repo-artifacts/latest-build.txt"
+        echo "Artifact name: $ARTIFACT_NAME"
+        echo "Artifact location: $ARTIFACT_ZIP"
+        echo "Latest build: repo-artifacts/latest-build.json"
         echo ""
-        echo "Large files split into <100MB parts:"
-        find "$ARTIFACT_DIR" -name "*.part*" | wc -l | xargs echo "  Parts count:"
+        if [ "$split_required" = "true" ]; then
+          echo "⚠️  Note: Zip file was split into parts (<100MB each)"
+          echo "    Use the provided .sh script to reassemble"
+        fi
+        echo ""
+        echo "To download the artifact:"
+        echo "  - From GitHub Actions: See 'Upload to GitHub Actions' step"
+        echo "  - From repository: $ARTIFACT_ZIP"
         echo "=========================================="
